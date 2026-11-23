@@ -20,14 +20,20 @@ void Draw(void* /*userData*/)
     OptiPlugin* plugin = g_plugin;
 
     api->Section("Backend");
-    const char* backends[] = { "Passthrough (phase 0)", "Blend (stub, coming in phase 0.5)" };
-    const bool disabled[] = { false, true };
+    const char* backends[] = { "Passthrough (phase 0)", "Blend (phase 0.5)" };
+    const bool disabled[] = { false, false };
     int backend = mfg::g_settings.backend.load();
     api->Combo("Backend##mfg", &backend, backends, 2, disabled);
-    api->ItemTooltip("Passthrough logs frame generation inputs and produces no frames. "
-                     "Switching to a real backend requires a game restart.");
-    api->TextDisabled("Real frames only. The passthrough backend validates the contract and "
-                      "writes mfg-provider.log next to the dll.");
+    api->ItemTooltip("Passthrough observes the frame generation inputs and produces nothing "
+                     "(FG slots stay black with FGOutput=dlssg). Blend copies the frame through "
+                     "the FG output chain so the image stays visible while backend work "
+                     "continues. Switching backends requires a game restart.");
+    if (backend == 1)
+        api->TextDisabled("Blend repeats the source frame in every FG slot; motion is not "
+                          "interpolated. Boot-to-exit stability is the phase 0.5 target.");
+    else
+        api->TextDisabled("Real frames only. The passthrough backend validates the contract "
+                          "and writes mfg-provider.log next to the dll.");
 
     api->Section("Frame generation");
     int multiplier = mfg::g_settings.multiplier.load();
@@ -70,11 +76,11 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const OptiPluginApi* api, O
     mfg::g_settings.multiplier.store(api->GetInt(plugin, "Multiplier", 2));
     mfg::g_settings.fileLog.store(api->GetBool(plugin, "FileLog", true));
 
-    api->RegisterTab(plugin, "MFG Provider", "Multi-frame generation provider skeleton (phase 0)", Draw,
+    api->RegisterTab(plugin, "MFG Provider", "Multi-frame generation provider skeleton (phases 0-0.5)", Draw,
                      nullptr);
 
     if (OPTI_API_HAS(api, Log))
-        api->Log(plugin, OptiLog_Info, "MFG provider phase 0: passthrough backend ready");
+        api->Log(plugin, OptiLog_Info, "MFG provider: backend ready");
 
     MFG_LOG_INFO("OptiPluginInit (plugin api v%u), backend=%s multiplier=%d", api->version,
                  mfg::BackendName(mfg::g_settings.backend.load()), mfg::g_settings.multiplier.load());
