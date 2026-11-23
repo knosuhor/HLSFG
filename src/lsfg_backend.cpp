@@ -6,6 +6,8 @@
 #include "lsfg/dll_extract.h"
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 
 namespace mfg
@@ -70,6 +72,216 @@ void CopyFrame(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* dst,
     };
     cmdList->ResourceBarrier(2, post);
 }
+// --- debug frame dump (MFG_DUMP) -------------------------------------
+// Optional runtime diagnosis: every burst evaluate copies a small ROI of
+// OutputReal and OutputInterpolated into readback buffers; the bytes land
+// on disk a few evals later, once the copy has certainly completed. The
+// files are packed rows of the source format (4 Bpp) sized per meta.txt,
+// analyzed offline by tools/dump_analyze. Environment variables:
+//   MFG_DUMP=<count>      dump this many burst evaluates (unset = off)
+//   MFG_DUMP_DIR=<path>   output directory (default %TEMP%\mfg-framedumps)
+//   MFG_DUMP_ROI=w,h,x,y  crop rectangle (default 640x360 centered)
+struct DumpSlot
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> rb[4];
+    uint64_t fidx = 0;
+    uint64_t stamp = 0;
+};
+
+struct DumpImpl
+{
+    bool enabled = false;
+    uint64_t remaining = 0;
+    uint64_t stamp = 0;
+    uint32_t roiW = 0, roiH = 0, roiX = 0, roiY = 0;
+    size_t pitch = 0, size = 0;
+    std::wstring dir;
+    DumpSlot pool[12];
+    size_t cursor = 0;
+} g_dump;
+
+void DumpSetup(ID3D12Device* device, uint32_t imgW, uint32_t imgH)
+{
+    (void) device;
+    char buf[64] = {};
+    if (GetEnvironmentVariableA("MFG_DUMP", buf, sizeof(buf)) == 0)
+        return;
+    g_dump.enabled = true;
+    g_dump.remaining = (uint64_t) _strtoui64(buf, nullptr, 10);
+    g_dump.roiW = imgW < 640 ? imgW : 640;
+    g_dump.roiH = imgH < 360 ? imgH : 360;
+    g_dump.roiX = (imgW - g_dump.roiW) / 2;
+    g_dump.roiY = (imgH - g_dump.roiH) / 2;    char roi[96] = {};
+    if (GetEnvironmentVariableA("MFG_DUMP_ROI", roi, sizeof(roi)) > 0)
+    {
+        unsigned w = 0, h = 0, x = 0, y = 0;
+        if (sscanf_s(roi, "%u,%u,%u,%u", &w, &h, &x, &y) == 4)
+        {
+            if (w > imgW) w = imgW;
+            if (h > imgH) h = imgH;
+            if (x > imgW - w) x = imgW - w;
+            if (y > imgH - h) y = imgH - h;
+            g_dump.roiW = w;
+            g_dump.roiH = h;
+            g_dump.roiX = x;
+            g_dump.roiY = y;
+        }
+    }
+    g_dump.pitch = ((size_t) g_dump.roiW * 4 + 255) & ~(size_t) 255;
+    g_dump.size = g_dump.pitch * g_dump.roiH + 512;
+    char d[MAX_PATH] = {};
+    std::filesystem::path outDir;
+    if (GetEnvironmentVariableA("MFG_DUMP_DIR", d, sizeof(d)) > 0)
+        outDir = std::filesystem::path(d);
+    else
+        outDir = std::filesystem::temp_directory_path() / "mfg-framedumps";
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    FILE* mf = _wfopen((outDir.wstring() + L"\\meta.txt").c_str(), L"w");
+    if (mf != nullptr)
+    {
+        std::fprintf(mf, "%u %u %u\n", g_dump.roiW, g_dump.roiH, 4);
+        std::fclose(mf);
+    }
+    g_dump.dir = outDir.wstring();
+    MFG_LOG_INFO("lsfg: dump armed roi=%ux%u at +%u+%u, %llu frames",
+        g_dump.roiW, g_dump.roiH, g_dump.roiX, g_dump.roiY,
+        (unsigned long long) g_dump.remaining);
+}
+
+bool DumpWrite(const std::wstring& path, ID3D12Resource* res)
+{
+    if (res == nullptr)
+        return false;
+    void* m = nullptr;
+    const D3D12_RANGE all{0, g_dump.size};
+    if (FAILED(res->Map(0, &all, &m)))        return false;
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (f != nullptr)
+    {
+        const uint8_t* src = static_cast<const uint8_t*>(m);
+        for (uint32_t y = 0; y < g_dump.roiH; ++y)
+            std::fwrite(src + (size_t) y * g_dump.pitch,
+                (size_t) g_dump.roiW * 4, 1, f);
+        std::fclose(f);
+    }
+    res->Unmap(0, nullptr);
+    return f != nullptr;
+}
+
+void DumpDrain(bool flush)
+{
+    if (!g_dump.enabled)
+        return;
+    for (DumpSlot& s : g_dump.pool)
+    {
+        if (s.stamp == 0)
+            continue;
+        if (!flush && g_dump.stamp - s.stamp < 5)
+            continue;
+        std::wstring name = g_dump.dir + L"\\real_" +
+            std::to_wstring(s.fidx) + L".raw";
+        DumpWrite(name, s.rb[0].Get());
+        name = g_dump.dir + L"\\interp_" +
+            std::to_wstring(s.fidx) + L".raw";
+        DumpWrite(name, s.rb[1].Get());
+        name = g_dump.dir + L"\\srcold_" +
+            std::to_wstring(s.fidx) + L".raw";
+        DumpWrite(name, s.rb[2].Get());
+        name = g_dump.dir + L"\\srcnew_" +
+            std::to_wstring(s.fidx) + L".raw";
+        DumpWrite(name, s.rb[3].Get());
+        s.stamp = 0;
+    }
+}
+void DumpCapture(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
+    uint64_t fidx, ID3D12Resource* real, ID3D12Resource* interp,
+    ID3D12Resource* srcOld, ID3D12Resource* srcNew)
+{
+    if (real == nullptr || interp == nullptr || srcOld == nullptr ||
+        srcNew == nullptr || cmdList == nullptr || device == nullptr)
+        return;
+    const D3D12_RESOURCE_DESC rd = real->GetDesc();
+    if (g_dump.pitch == 0)
+        DumpSetup(device, (uint32_t) rd.Width, (uint32_t) rd.Height);
+    if (!g_dump.enabled || g_dump.remaining == 0)
+        return;
+    if (rd.Width < g_dump.roiX + g_dump.roiW ||
+        rd.Height < g_dump.roiY + g_dump.roiH)
+        return;
+
+    DumpSlot& s = g_dump.pool[g_dump.cursor];
+    g_dump.cursor = (g_dump.cursor + 1) % 12;
+    if (!s.rb[0])
+    {
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = g_dump.size;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        for (int j = 0; j < 4; ++j)
+            if (FAILED(device->CreateCommittedResource(&hp,
+                    D3D12_HEAP_FLAG_NONE, &bd,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&s.rb[j]))))
+            {
+                g_dump.enabled = false;
+                MFG_LOG_ERROR("lsfg: dump readback alloc failed");
+                return;
+            }
+    }    ID3D12Resource* out[4] = {real, interp, srcOld, srcNew};
+    D3D12_RESOURCE_BARRIER pre[4] = {};
+    D3D12_RESOURCE_BARRIER post[4] = {};
+    for (int j = 0; j < 4; ++j)
+    {
+        pre[j].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        pre[j].Transition.pResource = out[j];
+        pre[j].Transition.StateBefore =
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        pre[j].Transition.StateAfter =
+            D3D12_RESOURCE_STATE_COPY_SOURCE;
+        pre[j].Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        post[j].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        post[j].Transition.pResource = out[j];
+        post[j].Transition.StateBefore =
+            D3D12_RESOURCE_STATE_COPY_SOURCE;
+        post[j].Transition.StateAfter =
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        post[j].Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    }
+    cmdList->ResourceBarrier(4, pre);
+    for (int j = 0; j < 4; ++j)
+    {
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = out[j];
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = s.rb[j].Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Offset = 0;
+        dst.PlacedFootprint.Footprint.Format = rd.Format;
+        dst.PlacedFootprint.Footprint.Width = g_dump.roiW;
+        dst.PlacedFootprint.Footprint.Height = g_dump.roiH;
+        dst.PlacedFootprint.Footprint.Depth = 1;
+        dst.PlacedFootprint.Footprint.RowPitch = (UINT) g_dump.pitch;
+        D3D12_BOX box{g_dump.roiX, g_dump.roiY, 0,
+            g_dump.roiX + g_dump.roiW, g_dump.roiY + g_dump.roiH, 1};
+        cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    }
+    cmdList->ResourceBarrier(4, post);
+    s.fidx = fidx;
+    s.stamp = ++g_dump.stamp;
+    --g_dump.remaining;
+}
+
 } // namespace
 
 NVSDK_NGX_Result LsfgBackend::InitD3D12(ID3D12Device* device)
@@ -150,6 +362,7 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         NVSDK_NGX_Parameter* params)
 {
     ++m_calls;
+    DumpDrain(false);
 
     ID3D12Resource* backbuffer = GetResource(params, "DLSSG.Backbuffer");
     ID3D12Resource* hudless = GetResource(params, "DLSSG.HUDLess");
@@ -298,6 +511,9 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         }
     }
 
+    DumpCapture(m_device, cmdList, m_fidx, outputReal, outputInterpolated,
+        m_pipeline.Source(static_cast<uint32_t>((m_fidx + 1) & 1)),
+        m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)));
     ++m_fidx;
     return NVSDK_NGX_Result_Success;
 }
@@ -307,6 +523,7 @@ void LsfgBackend::Shutdown()
     MFG_LOG_INFO("LsfgBackend shutdown after %llu evaluate calls, "
         "%llu generated groups, %llu blend fallbacks",
         m_calls, m_generations, m_fallbacks);
+    DumpDrain(true);
     m_fidx = 0;
     m_pipelineReady = false;
     m_device = nullptr;
