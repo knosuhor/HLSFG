@@ -78,6 +78,9 @@ class Pipeline
     // Records UAV clears for every transient image. Call once, on the
     // first burst evaluate, before RecordGraph().
     void RecordClears(ID3D12GraphicsCommandList* cmd);
+    // tools-only: re-record just the prepass mip dispatch (fidx parity).
+    void RecordPrepassOnly(ID3D12GraphicsCommandList* cmd, uint64_t fidx,
+        bool dispatch = true);
 
     // Burst evaluation for real-frame index fidx (0-based, one per group).
     // The pair being interpolated is (F_{fidx-1}, F_fidx): the backend
@@ -100,6 +103,13 @@ class Pipeline
 
     // GPU address of the constant slot (pass i, or prepass = genCount).
     D3D12_GPU_VIRTUAL_ADDRESS CbGpu(uint32_t slot) const;
+
+    // tools-only: transient texture access for offline inspection
+    // (which: 0..6 = flow mips, 10 = gamma1[6], 11 = delta1[2].image0,
+    // 12 = delta1[2].image1, 13 = beta0.outs[0])
+    ID3D12Resource* DebugResource(uint32_t which, Extent* ext,
+                                  DXGI_FORMAT* fmt) const;
+
 
   private:
     struct Tex

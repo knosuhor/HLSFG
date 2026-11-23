@@ -304,7 +304,9 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
                     static_cast<float>(genCount + 1);
             else
                 cb.timestamp = 0.5f; // prepass slot (index 0 of 1)
-            m_cbMapped[i] = cb;
+            *reinterpret_cast<ConstantBuffer*>(
+                reinterpret_cast<uint8_t*>(m_cbMapped) +
+                kCbAlign * i) = cb;
         }
     }
     const int prepassCb = static_cast<int>(genCount);
@@ -314,7 +316,11 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
         return false;
     for (uint32_t lvl = 0; lvl < kMipCount; ++lvl)
     {
-        m_mips[lvl] = CreateTex(kFmtR8, ShiftExtent(m_flowExtent, lvl), "flow mip");
+        // R8 typed UAV stores from the DXBC (float4 dcl_uav_typed)
+        // silently no-op on D3D12/NVIDIA: the mip pyramid read back as
+        // all-zero and the flow nets ran on a zero pyramid. The stored
+        // value is a broadcast scalar, so RGBA8 is semantically identical.
+        m_mips[lvl] = CreateTex(kFmtRgba8, ShiftExtent(m_flowExtent, lvl), "flow mip");
         if (m_mips[lvl] == nullptr)
             return false;
     }
@@ -427,7 +433,8 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
         }
         for (uint32_t k = 0; k < 6; ++k)
         {
-            m_beta1.outs[k] = CreateTex(kFmtR8, ShiftExtent(quarter, k), "beta1 mip");
+            // beta1 mips: same D3D12 R8 typed-store issue as the flow mips
+        m_beta1.outs[k] = CreateTex(kFmtRgba8, ShiftExtent(quarter, k), "beta1 mip");
             if (m_beta1.outs[k] == nullptr)
                 return false;
         }
@@ -523,6 +530,9 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
                 const Tex* dAdd0 = (j == 4) ? m_black
                     : pass.delta1[k - 1].image0;
                 const Tex* dAdd1 = pass.gamma1[j - 1].image;
+                // 266 refine needs the beta1 motion mip at 6 - j, same as
+                // gamma1 262 (lsfg-vk v2 wiring), not the refined gamma image
+                const Tex* dBeta = m_beta1.outs[6 - j];
                 const Tex* dAdd2 = (j == 4) ? m_black
                     : pass.delta1[k - 1].image1;
 
@@ -587,7 +597,7 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
                     d.sets[2] = BuildSet(265, t1a, t0a, cb, grp);
                     d.sets[3] = BuildSet(266,
                         {d.temp0[0], d.temp0[1], d.temp0[2], d.temp0[3],
-                         const_cast<Tex*>(dAdd0), const_cast<Tex*>(dAdd1)},
+                         const_cast<Tex*>(dAdd0), const_cast<Tex*>(dBeta)},
                         {d.image0}, cb, grp);
                     d.sets[4] = BuildSet(271,
                         {pass.delta0[k].outs1[0], pass.delta0[k].outs1[1]},
@@ -601,17 +611,19 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
             }
         }
 
-        // generate: 256. The pair order is (slot0, slot1) for both
-        // parities (content alternation yields the direction flip);
+        // generate: 256. The pair order alternates per parity so the
+        // shader always sees s0 = older, s1 = newest (lsfg-vk v2);
         // the UAV slot is rewritten to the OutputInterpolated slice
-        // on every evaluate. Two identical sets keep fidx parity.
+        // on every evaluate.
         {
             const Extent grp = AddShiftExtent(m_sourceExtent, 15, 4);
-            const std::vector<Tex*> srvs = {m_source[0], m_source[1],
-                pass.gamma1[6].image, pass.delta1[2].image0,
-                pass.delta1[2].image1};
+            // s0 = older (slot 1-p), s1 = newest (slot p) at parity p,
+            // matching the alternating generate binding in lsfg-vk v2
             for (uint32_t p = 0; p < 2; ++p)
             {
+                const std::vector<Tex*> srvs = {m_source[1 - p],
+                    m_source[p], pass.gamma1[6].image,
+                    pass.delta1[2].image0, pass.delta1[2].image1};
                 pass.gen[p].set = BuildSet(256, srvs, {m_black}, cb, grp);
                 pass.gen[p].uavSlot = pass.gen[p].set.heapStart +
                     pass.gen[p].set.srvCount;
@@ -626,6 +638,55 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
         flowScale, genCount);
     return true;
 }
+// tools-only: re-record just the prepass mip dispatch (fidx parity).
+// Debug instrumentation: the mips are first cleared to a sentinel so
+// the readback shows whether shader 255 actually writes these slots
+// (sentinel gone = the dispatch writes; sentinel kept = it does not).
+void Pipeline::RecordPrepassOnly(ID3D12GraphicsCommandList* cmd, uint64_t fidx, bool dispatch)
+{
+    if (m_heap == nullptr)
+        return;
+    ID3D12DescriptorHeap* heaps[] = {m_heap.Get()};
+    cmd->SetDescriptorHeaps(1, heaps);
+    const Set& ms = ((fidx & 1u) != 0u) ? m_mipOdd : m_mipEven;
+    static ID3D12DescriptorHeap* dbgCpu = nullptr;
+    if (dbgCpu == nullptr)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC d{};
+        d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        d.NumDescriptors = 8;
+        d.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(m_device->CreateDescriptorHeap(&d, IID_PPV_ARGS(&dbgCpu))))
+            dbgCpu = nullptr;
+    }
+    if (dbgCpu != nullptr)
+    {
+        const UINT sentinel[4] = {200, 200, 200, 200};
+        for (int lvl = 0; lvl < 7; ++lvl)
+        {
+            const Tex& t = *m_mips[static_cast<size_t>(lvl)];
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = t.fmt;
+            ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            const D3D12_CPU_DESCRIPTOR_HANDLE cpu{
+                dbgCpu->GetCPUDescriptorHandleForHeapStart().ptr +
+                static_cast<SIZE_T>(m_heapIncrement) * lvl};
+            m_device->CreateUnorderedAccessView(t.res.Get(), nullptr, &ud, cpu);
+            cmd->ClearUnorderedAccessViewUint(
+                D3D12_GPU_DESCRIPTOR_HANDLE{
+                    m_heap->GetGPUDescriptorHandleForHeapStart().ptr +
+                    static_cast<SIZE_T>(m_heapIncrement) *
+                        (ms.heapStart + ms.srvCount +
+                         static_cast<uint32_t>(lvl))},
+                cpu, t.res.Get(), sentinel, 0, nullptr);
+        }
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        cmd->ResourceBarrier(1, &b);
+    }
+    if (dispatch)
+        DispatchSet(cmd, ms);
+}
 void Pipeline::RecordGraph(ID3D12GraphicsCommandList* cmd, uint64_t fidx,
         ID3D12Resource* interp, uint32_t interpSlices)
 {
@@ -638,8 +699,8 @@ void Pipeline::RecordGraph(ID3D12GraphicsCommandList* cmd, uint64_t fidx,
     const uint32_t parity = static_cast<uint32_t>(fidx & 1);
 
     // --- prepass on the flow pyramid ---
-    // "first" of the pair (older frame) sits in ring slot (fidx+1)&1:
-    DispatchSet(cmd, (parity == 0) ? m_mipOdd : m_mipEven);
+    // prepass always mips the NEWEST frame (slot fidx&1), as in lsfg-vk v2
+    DispatchSet(cmd, (parity == 0) ? m_mipEven : m_mipOdd);
     for (int lvl = 6; lvl >= 0; --lvl)
     {
         const AlphaCh& a = m_alpha[lvl];
@@ -692,4 +753,91 @@ void Pipeline::RecordGraph(ID3D12GraphicsCommandList* cmd, uint64_t fidx,
         DispatchSet(cmd, g.set);
     }
 }
+// tools-only: transient texture access for offline inspection
+ID3D12Resource* Pipeline::DebugResource(uint32_t which, Extent* ext,
+        DXGI_FORMAT* fmt) const
+{
+    const Tex* t = nullptr;
+    switch (which)
+    {
+    case 0: case 1: case 2: case 3: case 4: case 5: case 6:
+        t = m_mips[which];
+        break;
+    case 13:
+        t = m_beta0.outs[0];
+        break;
+    case 14:
+        t = m_source[0];
+        break;
+    case 15:
+        t = m_source[1];
+        break;
+    case 10: case 11: case 12: case 30: case 31: case 32: case 33:
+    case 40: case 41: case 42: case 43: case 44: case 45: case 46: case 47:
+    case 50: case 51: case 52: case 53: case 54:
+    case 60: case 61: case 62: case 63: case 64: case 65: case 66:
+    {
+        if (m_passes.empty())
+            return nullptr;
+        const PassCh& p = m_passes.back();
+        if (which == 10)
+            t = p.gamma1[6].image;
+        else if (which == 11)
+            t = p.delta1[2].image0;
+        else if (which == 12)
+            t = p.delta1[2].image1;
+        else if (which == 30)
+            t = p.gamma1[5].image;
+        else if (which == 31)
+            t = p.gamma1[4].image;
+        else if (which == 32)
+            t = p.gamma1[0].image;
+        else if (which == 33)
+            t = p.gamma1[6].temp0[3];
+        else if (which == 40)
+            t = p.delta1[1].image0;
+        else if (which == 41)
+            t = p.delta1[1].image1;
+        else if (which == 42)
+            t = p.delta1[0].image0;
+        else if (which == 43)
+            t = p.delta1[0].image1;
+        else if (which == 40 + 4)
+            t = p.delta1[2].temp0[0];
+        else if (which == 40 + 5)
+            t = p.delta1[2].temp1[0];
+        else if (which == 50)
+            t = p.gamma0[6].outs[0];
+        else if (which == 51)
+            t = p.gamma0[6].outs[1];
+        else if (which == 52)
+            t = p.gamma0[6].outs[2];
+        else if (which == 53)
+            t = p.gamma0[5].outs[0];
+        else if (which == 54)
+            t = p.gamma0[0].outs[0];
+        else if (which == 60)
+            t = p.delta0[2].outs0[0];
+        else if (which == 61)
+            t = p.delta0[2].outs0[1];
+        else if (which == 62)
+            t = p.delta0[2].outs0[2];
+        else if (which == 63)
+            t = p.delta0[2].outs1[0];
+        else
+            t = p.delta0[2].outs1[1];
+        break;
+    }
+    default:
+        return nullptr;
+    }
+    if (t == nullptr)
+        return nullptr;
+    if (ext != nullptr)
+        *ext = t->ext;
+    if (fmt != nullptr)
+        *fmt = t->fmt;
+    return t->res.Get();
+}
+
 } // namespace mfg::lsfg

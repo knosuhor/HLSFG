@@ -209,10 +209,14 @@ bool ShaderBank::Load(ID3D12Device* device,
             ss.ShaderRegister = s;
             ss.RegisterSpace = 0;
             ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            // lsfg-vk never sets compareEnable (VK_FALSE default: the
+            // compareOp field is dead) and the DXBC declares every sampler
+            // of this family as mode_default. EdgeCompare is CLAMP-to-edge
+            // + plain bilinear, NOT a comparison sampler.
             if (samplerKinds[s] == SamplerKind::EdgeCompare)
             {
-                ss.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
-                ss.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                ss.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NONE;
                 ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
             }
             else if (samplerKinds[s] == SamplerKind::BorderWhite)
