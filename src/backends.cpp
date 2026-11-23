@@ -103,6 +103,8 @@ const char* BackendName(int backend)
 
 IFGBackend* ActiveBackend()
 {
-    return g_settings.backend.load() == static_cast<int>(BackendKind::Blend) ? &g_blend : &g_passthrough;
+    return g_settings.backend.load() == static_cast<int>(BackendKind::Blend)
+               ? static_cast<IFGBackend*>(&g_blend)
+               : static_cast<IFGBackend*>(&g_passthrough);
 }
 } // namespace mfg
