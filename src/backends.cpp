@@ -161,8 +161,18 @@ NVSDK_NGX_Result BlendBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     ID3D12Resource* hudless = GetResource(params, "DLSSG.HUDLess");
     ID3D12Resource* outputReal = GetResource(params, "DLSSG.OutputReal");
     ID3D12Resource* outputInterpolated = GetResource(params, "DLSSG.OutputInterpolated");
-    const unsigned long long frameIndex = GetInteger(params, "DLSSG.MultiFrameIndex", 1);
+
+    // Slot identity arrives through the generic pointer getter: measured
+    // against OptiScaler 10.0.0-dev the int-typed Get fails while the void*
+    // Get hands the value over in the pointer bits. MultiFrameIndex of 0 (or a
+    // missing key) means burst mode: one Evaluate per real frame carries every
+    // output of the group at once instead of one call per presented slot.
+    void* rawIndex = nullptr;
+    const bool hasIndex =
+        params->Get("DLSSG.MultiFrameIndex", &rawIndex) == NVSDK_NGX_Result_Success && rawIndex != nullptr;
+    const unsigned long long frameIndex = hasIndex ? (unsigned long long)(uintptr_t)rawIndex : 1;
     const unsigned long long frameCount = GetInteger(params, "DLSSG.MultiFrameCount", 1);
+    const bool burst = !hasIndex || frameIndex == 0;
 
     const bool verbose = m_calls <= 5 || (m_calls % 300) == 0;
     if (verbose)
@@ -177,6 +187,35 @@ NVSDK_NGX_Result BlendBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     // chain. Real slots get the backbuffer (HUD included), interpolated
     // slots repeat the HUD-less color when the game + OptiScaler provide one
     // and fall back to the backbuffer otherwise.
+
+    // Burst mode: one Evaluate per real frame with every output of the group
+    // present, OptiScaler then presents them in order. Fill both.
+    if (burst)
+    {
+        bool copied = false;
+        ID3D12Resource* interpSource = hudless != nullptr ? hudless : backbuffer;
+
+        if (outputReal != nullptr && backbuffer != nullptr && cmdList != nullptr)
+        {
+            CopyFrame(cmdList, outputReal, backbuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ++m_copies;
+            copied = true;
+        }
+        if (outputInterpolated != nullptr && interpSource != nullptr && cmdList != nullptr)
+        {
+            CopyFrame(cmdList, outputInterpolated, interpSource,
+                      hudless != nullptr ? D3D12_RESOURCE_STATE_COPY_DEST
+                                         : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ++m_copies;
+            copied = true;
+        }
+
+        if (!copied)
+            ++m_missedOutputs;
+
+        return NVSDK_NGX_Result_Success;
+    }
+
     bool copied = false;
     if (frameIndex == 1)
     {
