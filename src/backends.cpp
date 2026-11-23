@@ -1,6 +1,7 @@
 #include "backends.h"
 
 #include "log.h"
+#include "lsfg_backend.h"
 #include "mfg_state.h"
 
 #include <mutex>
@@ -12,6 +13,7 @@ namespace
 std::mutex g_backendMutex;
 PassthroughBackend g_passthrough;
 BlendBackend g_blend;
+LsfgBackend g_lsfg;
 
 // Keys probed on every Evaluate to characterize what the game + OptiScaler
 // hand us. Measured against OptiScaler 10.0.0-dev (custom NVNGX DLSSG
@@ -257,14 +259,21 @@ const char* BackendName(int backend)
     switch (backend)
     {
     case static_cast<int>(BackendKind::Blend): return "blend";
+    case static_cast<int>(BackendKind::Lsfg): return "lsfg";
     default: return "passthrough";
     }
 }
 
 IFGBackend* ActiveBackend()
 {
-    return g_settings.backend.load() == static_cast<int>(BackendKind::Blend)
-               ? static_cast<IFGBackend*>(&g_blend)
-               : static_cast<IFGBackend*>(&g_passthrough);
+    switch (g_settings.backend.load())
+    {
+    case static_cast<int>(BackendKind::Blend):
+        return static_cast<IFGBackend*>(&g_blend);
+    case static_cast<int>(BackendKind::Lsfg):
+        return static_cast<IFGBackend*>(&g_lsfg);
+    default:
+        return static_cast<IFGBackend*>(&g_passthrough);
+    }
 }
 } // namespace mfg

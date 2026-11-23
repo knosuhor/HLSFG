@@ -21,6 +21,8 @@
 
 namespace mfg
 {
+class LsfgBackend; // phase 1: defined in lsfg_backend.h
+
 class IFGBackend
 {
   public:

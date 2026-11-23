@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(mfg-provider LANGUAGES CXX)
 
-# Phase 0 skeleton: custom dlssg provider for OptiScaler.
+# MFG Provider: custom dlssg provider for OptiScaler (phases 0-1).
 # Output name matters: custom/<name>/dlssg accepts any dll, but the standard
 # name nvngx_dlssg.dll keeps the folder unambiguous (misc/CustomProviders.h).
 add_library(mfg-provider SHARED
@@ -9,6 +9,10 @@ add_library(mfg-provider SHARED
     src/ngx_exports.cpp
     src/plugin.cpp
     src/backends.cpp
+    src/lsfg_backend.cpp
+    src/lsfg/shader_bank.cpp
+    src/lsfg/pipeline.cpp
+    src/lsfg/dll_extract.cpp
     src/mfg_state.cpp
     src/log.cpp
 )
@@ -27,9 +31,11 @@ if(MSVC)
     set_property(TARGET mfg-provider PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
 
-# d3d12.h / dxgi.h come from the Windows SDK; no d3d12.lib needed in phase 0
-# (we only store and log pointers, never call into D3D12).
-target_link_libraries(mfg-provider PRIVATE dxgi)
+# d3d12.h / dxgi.h come from the Windows SDK; phase 1 links d3d12.lib for
+# the D3D12SerializeRootSignature used by the LSFG shader bank, and calls
+# D3DReflect through d3dcompiler_47.dll loaded dynamically at runtime (the
+# probe tool links it directly instead).
+target_link_libraries(mfg-provider PRIVATE d3d12 dxgi)
 
 # Developer tools (lsfg_probe etc). Off by default; CI builds only the dll.
 option(MFG_BUILD_TOOLS "Build developer tools" OFF)
