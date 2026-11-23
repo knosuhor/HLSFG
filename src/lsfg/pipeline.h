@@ -214,6 +214,7 @@ class Pipeline
     uint32_t m_genCount = 1;
 
     ml::ComPtr<ID3D12DescriptorHeap> m_heap;    // SRV + UAV (shader-visible)
+    ml::ComPtr<ID3D12DescriptorHeap> m_cpuHeap;  // non-shader-visible mirror (clears)
     ml::ComPtr<ID3D12Resource> m_cbUpload;       // (gen+1) x 256 B
     ConstantBuffer* m_cbMapped = nullptr;
     uint32_t m_heapIncrement = 0;

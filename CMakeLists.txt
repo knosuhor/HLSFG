@@ -36,7 +36,6 @@ endif()
 # D3DReflect through d3dcompiler_47.dll loaded dynamically at runtime (the
 # probe tool links it directly instead).
 target_link_libraries(mfg-provider PRIVATE d3d12 dxgi)
-
 # Developer tools (lsfg_probe etc). Off by default; CI builds only the dll.
 option(MFG_BUILD_TOOLS "Build developer tools" OFF)
 if(MFG_BUILD_TOOLS)
@@ -47,5 +46,19 @@ if(MFG_BUILD_TOOLS)
         target_compile_options(lsfg_probe PRIVATE /W4 /permissive- /EHsc)
         target_compile_definitions(lsfg_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_link_libraries(lsfg_probe PRIVATE d3dcompiler dxgi)
+    endif()
+
+    # Offline repro for the phase-1 pipeline: debug layer + clears + one
+    # burst graph evaluation, prints debug-layer messages and the device
+    # removal reason.
+    add_executable(lsfg_pipeline_test tools/lsfg_pipeline_test.cpp
+        src/lsfg/dll_extract.cpp src/lsfg/shader_bank.cpp src/lsfg/pipeline.cpp
+        src/log.cpp src/mfg_state.cpp)
+    target_include_directories(lsfg_pipeline_test PRIVATE src)
+    target_compile_features(lsfg_pipeline_test PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(lsfg_pipeline_test PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(lsfg_pipeline_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_link_libraries(lsfg_pipeline_test PRIVATE d3d12 dxgi d3dcompiler)
     endif()
 endif()

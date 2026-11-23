@@ -171,6 +171,18 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         ? D3D12_RESOURCE_STATE_COPY_DEST
         : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
+    // TEMP instrumentation: slot identity + resource pointers per call
+    void* rawCount = nullptr;
+    const bool hasCount =
+        params->Get("DLSSG.MultiFrameCount", &rawCount) ==
+            NVSDK_NGX_Result_Success && rawCount != nullptr;
+    if (m_calls <= 12 || (m_calls % 500) == 0)
+        MFG_LOG_INFO("lsfg: call#%llu mfiHas=%d mfi=%llu | mfcHas=%d mfc=%llu | hudless=%p bb=%p real=%p interp=%p",
+            m_calls, (int) hasIndex, frameIndex, (int) hasCount,
+            hasCount ? (unsigned long long)(uintptr_t) rawCount : 0ULL,
+            (void*) hudless, (void*) backbuffer, (void*) outputReal,
+            (void*) outputInterpolated);
+
     // Blend-style fill used whenever the graph cannot run (first frame,
     // unsupported format, one-Evaluate-per-slot mode, init failure).
     auto fallback = [&]()

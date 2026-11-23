@@ -83,6 +83,7 @@ void Pipeline::WriteSrv(uint32_t slot, const Tex& tex)
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
     desc.Format = tex.fmt;
     desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    desc.Texture2D.MipLevels = 0xFFFFFFFF; // -1 = all mips (0 is invalid)
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     m_device->CreateShaderResourceView(tex.res.Get(), &desc,
         {m_heap->GetCPUDescriptorHandleForHeapStart().ptr + m_heapIncrement * slot});
@@ -184,12 +185,32 @@ void Pipeline::RecordClears(ID3D12GraphicsCommandList* cmd)
     {
         const Tex& tex = *m_pool[i];
         WriteUav(m_clearSlots[i], tex);
-        cmd->ClearUnorderedAccessViewUint(
-            {m_heap->GetGPUDescriptorHandleForHeapStart().ptr +
-             m_heapIncrement * m_clearSlots[i]},
-            {m_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-             m_heapIncrement * m_clearSlots[i]},
-            tex.res.Get(), zeros, 0, nullptr);
+        if (m_cpuHeap)
+        {
+            // ClearUnorderedAccessView* demands a CPU handle that lives
+            // in a non-shader-visible heap; mirror the UAV descriptor there.
+            D3D12_UNORDERED_ACCESS_VIEW_DESC cdesc{};
+            cdesc.Format = tex.fmt;
+            cdesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            m_device->CreateUnorderedAccessView(tex.res.Get(), nullptr, &cdesc,
+                {m_cpuHeap->GetCPUDescriptorHandleForHeapStart().ptr +
+                 m_heapIncrement * i});
+            cmd->ClearUnorderedAccessViewUint(
+                {m_heap->GetGPUDescriptorHandleForHeapStart().ptr +
+                 m_heapIncrement * m_clearSlots[i]},
+                {m_cpuHeap->GetCPUDescriptorHandleForHeapStart().ptr +
+                 m_heapIncrement * i},
+                tex.res.Get(), zeros, 0, nullptr);
+        }
+        else
+        {
+            cmd->ClearUnorderedAccessViewUint(
+                {m_heap->GetGPUDescriptorHandleForHeapStart().ptr +
+                 m_heapIncrement * m_clearSlots[i]},
+                {m_heap->GetCPUDescriptorHandleForHeapStart().ptr +
+                 m_heapIncrement * m_clearSlots[i]},
+                tex.res.Get(), zeros, 0, nullptr);
+        }
     }
 
     D3D12_RESOURCE_BARRIER barrier{};
@@ -209,6 +230,14 @@ void Pipeline::CommitHeap()
     }
     m_heapIncrement =
         m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    // non-shader-visible mirror heap: ClearUnorderedAccessView*
+    // CPU handles must come from a heap the CPU can read.
+    D3D12_DESCRIPTOR_HEAP_DESC chd{};
+    chd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    chd.NumDescriptors = m_pool.empty() ? 1u : static_cast<UINT>(m_pool.size());
+    if (FAILED(m_device->CreateDescriptorHeap(&chd, IID_PPV_ARGS(&m_cpuHeap))))
+        MFG_LOG_ERROR("lsfg: failed to create the clear descriptor heap");
 
     // flush the deferred set descriptors
     for (const PendingWrite& w : m_pending)
