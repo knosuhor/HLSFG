@@ -277,8 +277,25 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         if (m_calls <= 3)
             MFG_LOG_INFO("lsfg: stage=graph-done");
         if (outputReal != nullptr && backbuffer != nullptr)
-            CopyFrame(cmdList, outputReal, backbuffer,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (outputReal != nullptr)
+        {
+            // LS latency model: the group is presented as
+            // [previous real frame, generated midpoint]. Filling
+            // OutputReal with the CURRENT backbuffer instead makes the
+            // presented timeline jump backwards on every interpolated
+            // slot (visible jitter/oscillation of the whole image).
+            ID3D12Resource* prev = m_pipeline.Source(
+                static_cast<uint32_t>((m_fidx + 1) & 1));
+            if (prev != nullptr &&
+                prev->GetDesc().Format == outputReal->GetDesc().Format)
+            {
+                CopyFrame(cmdList, outputReal, prev,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            else if (backbuffer != nullptr)
+                CopyFrame(cmdList, outputReal, backbuffer,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
     }
 
     ++m_fidx;
