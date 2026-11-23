@@ -223,7 +223,8 @@ void Pipeline::CommitHeap()
 }
 
 bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
-        Extent sourceExtent, uint32_t flowScale, uint32_t genCount)
+        Extent sourceExtent, uint32_t flowScale, uint32_t genCount,
+        DXGI_FORMAT sourceFormat)
 {
     m_device = device;
     m_bank = &bank;
@@ -288,8 +289,12 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
         if (m_mips[lvl] == nullptr)
             return false;
     }
-    m_source[0] = CreateTex(kFmtRgba8, sourceExtent, "source even");
-    m_source[1] = CreateTex(kFmtRgba8, sourceExtent, "source odd");
+    // The ring pair holds byte-exact copies of the source frame: it must be
+    // created in the source format family or CopyResource is invalid (BGRA8
+    // is the measured swapchain/slot family). UAV clears/casts above rely
+    // on the clear+SRV path only where the format allows it.
+    m_source[0] = CreateTex(sourceFormat, sourceExtent, "source even");
+    m_source[1] = CreateTex(sourceFormat, sourceExtent, "source odd");
     if (m_source[0] == nullptr || m_source[1] == nullptr)
         return false;
 

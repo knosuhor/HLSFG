@@ -25,7 +25,8 @@ class LsfgBackend final : public IFGBackend
     void Shutdown() override;
 
   private:
-    bool EnsurePipeline(uint32_t width, uint32_t height, uint32_t slices);
+    bool EnsurePipeline(uint32_t width, uint32_t height, uint32_t slices,
+        DXGI_FORMAT sourceFormat);
 
     ID3D12Device* m_device = nullptr;
     lsfg::ShaderBank m_bank;

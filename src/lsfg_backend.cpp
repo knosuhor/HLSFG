@@ -129,7 +129,7 @@ NVSDK_NGX_Result LsfgBackend::InitD3D12(ID3D12Device* device)
 }
 
 bool LsfgBackend::EnsurePipeline(uint32_t width, uint32_t height,
-        uint32_t slices)
+        uint32_t slices, DXGI_FORMAT sourceFormat)
 {
     if (m_pipelineReady || m_pipelineFailed || !m_bankReady)
         return m_pipelineReady;
@@ -137,7 +137,8 @@ bool LsfgBackend::EnsurePipeline(uint32_t width, uint32_t height,
         return false;
 
     const uint32_t flow = static_cast<uint32_t>(g_settings.lsFlow.load());
-    if (!m_pipeline.Init(m_device, m_bank, {width, height}, flow, slices))
+    if (!m_pipeline.Init(m_device, m_bank, {width, height}, flow, slices,
+            sourceFormat))
     {
         m_pipelineFailed = true;
         return false;
@@ -214,8 +215,14 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     if (slices == 0)
         slices = 1;
 
+    if (m_calls <= 3)
+        MFG_LOG_INFO("lsfg: eval#%llu fidx=%llu src fmt=%u flags=0x%x | interp fmt=%u flags=0x%x depth=%u",
+            m_calls, m_fidx, static_cast<unsigned>(srcDesc.Format),
+            static_cast<unsigned>(srcDesc.Flags), static_cast<unsigned>(interpDesc.Format),
+            static_cast<unsigned>(interpDesc.Flags), slices);
+
     if (!EnsurePipeline(static_cast<uint32_t>(srcDesc.Width),
-            static_cast<uint32_t>(srcDesc.Height), slices))
+            static_cast<uint32_t>(srcDesc.Height), slices, srcDesc.Format))
     {
         fallback();
         return NVSDK_NGX_Result_Success;
@@ -243,14 +250,20 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     if (m_fidx == 0)
     {
         // first real frame: zero the transient images, blend the group
+        if (m_calls <= 3)
+            MFG_LOG_INFO("lsfg: stage=clears");
         m_pipeline.RecordClears(cmdList);
         fallback();
     }
     else
     {
         // the pair (F_{fidx-1}, F_fidx) now sits in the ring: generate
+        if (m_calls <= 3)
+            MFG_LOG_INFO("lsfg: stage=graph fidx=%llu", m_fidx);
         m_pipeline.RecordGraph(cmdList, m_fidx, outputInterpolated, slices);
         ++m_generations;
+        if (m_calls <= 3)
+            MFG_LOG_INFO("lsfg: stage=graph-done");
         if (outputReal != nullptr && backbuffer != nullptr)
             CopyFrame(cmdList, outputReal, backbuffer,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

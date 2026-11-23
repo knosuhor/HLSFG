@@ -73,7 +73,7 @@ class Pipeline
     // divisor (2 = quarter-res optical flow). genCount must match the
     // slice count of the external OutputInterpolated resource.
     bool Init(ID3D12Device* device, ShaderBank& bank, Extent sourceExtent,
-              uint32_t flowScale, uint32_t genCount);
+              uint32_t flowScale, uint32_t genCount, DXGI_FORMAT sourceFormat);
 
     // Records UAV clears for every transient image. Call once, on the
     // first burst evaluate, before RecordGraph().

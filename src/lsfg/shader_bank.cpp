@@ -59,7 +59,7 @@ const std::vector<SamplerKind> kSamplers[] = {
     /* 276 beta1a   */ {SamplerKind::BorderBlack},
     /* 277 beta1b   */ {SamplerKind::BorderBlack},
     /* 278 beta1c   */ {SamplerKind::BorderBlack},
-    /* 279 betaMip  */ {SamplerKind::BorderBlack, SamplerKind::EdgeCompare},
+    /* 279 betaMip  */ {SamplerKind::BorderBlack},
 };
 } // namespace
 
