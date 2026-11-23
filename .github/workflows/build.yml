@@ -29,8 +29,11 @@ jobs:
       - name: List exports
         shell: pwsh
         run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "**/Hostx64/x64/dumpbin.exe" | Select-Object -First 1
           $dll = Get-ChildItem -Recurse -Filter nvngx_dlssg.dll build | Select-Object -First 1
-          dumpbin /exports $dll.FullName
+          if ($null -eq $dll) { throw "nvngx_dlssg.dll not found in build/" }
+          & $dumpbin /exports $dll.FullName
 
       - uses: actions/upload-artifact@v4
         with:
