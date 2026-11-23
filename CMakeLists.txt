@@ -30,3 +30,16 @@ endif()
 # d3d12.h / dxgi.h come from the Windows SDK; no d3d12.lib needed in phase 0
 # (we only store and log pointers, never call into D3D12).
 target_link_libraries(mfg-provider PRIVATE dxgi)
+
+# Developer tools (lsfg_probe etc). Off by default; CI builds only the dll.
+option(MFG_BUILD_TOOLS "Build developer tools" OFF)
+if(MFG_BUILD_TOOLS)
+    add_executable(lsfg_probe tools/lsfg_probe.cpp src/lsfg/dll_extract.cpp)
+    target_include_directories(lsfg_probe PRIVATE src)
+    target_compile_features(lsfg_probe PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(lsfg_probe PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(lsfg_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_link_libraries(lsfg_probe PRIVATE d3dcompiler dxgi)
+    endif()
+endif()

@@ -47,8 +47,14 @@ Only `Interpolate(frameA, frameB, t)` changes per phase.
 
 ## Phase 1 notes (LSFG)
 
-- Reuse the lsfg-vk loader (PE parse + DXBC->SPIR-V via statically linked
-  DXVK subset) as a library; GPL-3 both sides, no conflict with OptiScaler.
+- Measured correction (LS 3.2.1, 2026-11-23): LS now ships **DXBC SM5
+  compute shaders** in RT_RCDATA, not SPIR-V. The backend runs them
+  natively on D3D12, so no Vulkan, no statically linked DXVK, no
+  interop; the lsfg-vk loader is replaced by our own PE RCDATA parser
+  and the execution graph is ported from lsfg-vk tag v2.0.0-dev (last
+  GPL-3.0-or-later release, attribution in source). Current lsfg-vk
+  (lsfg-vk.dev, post-migration 2.0) is CC BY-NC-ND and off limits.
+  Id-to-shader table and probe findings: `docs/PHASE1.md`.
 - Distribution: **never ship Lossless Scaling resources**. Runtime reads from
   the user's own LS install; process-local translation only (lsfg-vk pattern).
 - MAKO FG's own screen-overlay/HUD stage is skipped entirely: in this
@@ -58,8 +64,12 @@ Only `Interpolate(frameA, frameB, t)` changes per phase.
   recomposition ends: UI drawn over interpolated slots flickers. Phase 1
   must verify OptiScaler's UIComposition/DrawUIOverFG stage closes that
   gap, or the backend composites UI itself from the real-frame copy.
-- Maintenance risk: LS version churn changes resource offsets; expect the
-  lsfg-vk compat treadmill.
+- Maintenance risk: LS version churn. Measured: the 3.1-era resources
+  were SPIR-V (lsfg-vk raw-id = base 49 scheme), 3.2.1 packs raw DXBC
+  ids 101-302 with the FG family at 255-279. Support stays per LS
+  version; `tools/lsfg_probe` (see `docs/PHASE1.md`) regenerates the
+  binding tables against a new install before the backend is pointed
+  at it.
 
 ## Phase 2 notes (MAKO FG)
 
