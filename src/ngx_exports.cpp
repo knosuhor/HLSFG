@@ -25,6 +25,12 @@
 #include "ngx/nvsdk_ngx_defs.h"
 #include "ngx/nvsdk_ngx_params.h"
 
+// Copied 1:1 from nvsdk_ngx.h (third NGX SDK header; not fetched by CI to keep
+// vendoring minimal). Same pointer type OptiScaler resolves in
+// NgxFeatureModule::LoadExports, so the export signature matches the real SDK.
+typedef void (NVSDK_CONV* PFN_NVSDK_NGX_ProgressCallback)(float InCurrentProgress,
+                                                          bool& OutShouldCancel);
+
 namespace
 {
 struct MfgFeature

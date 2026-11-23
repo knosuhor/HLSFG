@@ -15,6 +15,7 @@
 #include <dxgi.h>
 
 #include "ngx/nvsdk_ngx_defs.h"
+#include "ngx/nvsdk_ngx_params.h"
 
 namespace mfg
 {
