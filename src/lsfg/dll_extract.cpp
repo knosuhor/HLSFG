@@ -40,7 +40,8 @@ uint32_t rd32(const Reader& r, size_t off)
 
 uint32_t resDirEntryCount(const Reader& r, size_t dir)
 {
-    // named entries (12) + id entries (14)
+    // named entries (12 bytes each) + id entries (14 bytes each) follow
+    // the 16-byte directory header
     return static_cast<uint32_t>(rd16(r, dir + 12)) + rd16(r, dir + 14);
 }
 } // namespace
@@ -80,7 +81,7 @@ std::map<uint32_t, std::vector<uint8_t>> ExtractRcData(const std::filesystem::pa
     const uint32_t sectCount = rd16(r, peOff + 6);
     const uint32_t optSize = rd16(r, peOff + 20);
     const size_t opt = peOff + 24;
-    if (rd16(r, opt) ! = 0x20B)
+    if (rd16(r, opt) != 0x20B)
         fail("not PE32+");
 
     // data directory #2 (resources): RVA at optional header offset 128
@@ -119,7 +120,7 @@ std::map<uint32_t, std::vector<uint8_t>> ExtractRcData(const std::filesystem::pa
             continue;
         if ((off & 0x80000000) == 0)
             fail("RT_RCDATA entry is not a directory");
-        rcdataDir = resRaw + (off & 0x7FFFFFFFu);
+        rcdataDir = resRaw + (off & 0x7FFFFFFF);
         foundRc = true;
     }
     if (!foundRc)
@@ -135,7 +136,7 @@ std::map<uint32_t, std::vector<uint8_t>> ExtractRcData(const std::filesystem::pa
         if ((off & 0x80000000) == 0)
             fail("RCDATA entry is not a directory");
         // language directory -> actual data entry
-        const size_t langDir = resRaw + (off & 0x7FFFFFFFu);
+        const size_t langDir = resRaw + (off & 0x7FFFFFFF);
         const uint32_t langCount = resDirEntryCount(r, langDir);
         if (langCount < 1)
             fail("empty language directory");
@@ -143,7 +144,7 @@ std::map<uint32_t, std::vector<uint8_t>> ExtractRcData(const std::filesystem::pa
         const uint32_t dataOff = rd32(r, langEntry);
         if ((dataOff & 0x80000000) != 0)
             fail("language entry is not a data entry");
-        const size_t dataEntry = resRaw + (dataOff & 0x7FFFFFFFu);
+        const size_t dataEntry = resRaw + (dataOff & 0x7FFFFFFF);
         const uint32_t rva = rd32(r, dataEntry + 0);
         const uint32_t size = rd32(r, dataEntry + 4);
         const size_t fo = rva - resRva + resRaw;

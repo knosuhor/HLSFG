@@ -16,7 +16,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <ostream>
+#include <fstream>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
@@ -61,8 +62,6 @@ const char* TypeName(D3D_SHADER_INPUT_TYPE t)
     case D3D_SIT_STRUCTURED: return "srv-structured";
     case D3D_SIT_BYTEADDRESS: return "srv-ba";
     case D3D_SIT_UAV_RWBYTEADDRESS: return "uav-ba";
-    case D3D_SIT_UAV_APPEND: return "uav-append";
-    case D3D_SIT_UAV_CONSUME: return "uav-consume";
     case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: return "uav-structured-cnt";
     default: return "other";
     }
