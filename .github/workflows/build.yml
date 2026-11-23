@@ -1,0 +1,38 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch NGX SDK headers (NVIDIA proprietary, not vendored here)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force include/ngx | Out-Null
+          $base = "https://raw.githubusercontent.com/optiscaler/OptiScaler/master/external/nvngx_dlss_sdk"
+          Invoke-WebRequest "$base/nvsdk_ngx_defs.h" -OutFile include/ngx/nvsdk_ngx_defs.h
+          Invoke-WebRequest "$base/nvsdk_ngx_params.h" -OutFile include/ngx/nvsdk_ngx_params.h
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: List exports
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse -Filter nvngx_dlssg.dll build | Select-Object -First 1
+          dumpbin /exports $dll.FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mfg-provider-win-x64
+          path: build/**/nvngx_dlssg.dll
