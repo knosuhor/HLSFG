@@ -35,6 +35,7 @@ class LsfgBackend final : public IFGBackend
     bool m_pipelineReady = false;  // graph built for this resolution
     bool m_pipelineFailed = false; // do not retry this session
     bool m_formatWarned = false;
+    bool m_rgb10Logged = false;   // R10G10B10A2 acceptance logged once
     uint64_t m_fidx = 0;           // real frames fed into the ring
     uint64_t m_calls = 0;
     uint64_t m_generations = 0;

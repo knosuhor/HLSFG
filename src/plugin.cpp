@@ -23,7 +23,8 @@ void Draw(void* /*userData*/)
     const char* backends[] = { "Passthrough (phase 0)", "Blend (phase 0.5)", "LSFG (phase 1)" };
     const bool disabled[] = { false, false, false };
     int backend = mfg::g_settings.backend.load();
-    api->Combo("Backend##mfg", &backend, backends, 3, disabled);
+    if (api->Combo("Backend##mfg", &backend, backends, 3, disabled))
+        mfg::g_settings.backend.store(backend);
     api->ItemTooltip("Passthrough observes the frame generation inputs and produces nothing "
                      "(FG slots stay black with FGOutput=dlssg). Blend copies the frame through "
                      "the FG output chain so the image stays visible while backend work "

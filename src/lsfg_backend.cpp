@@ -21,7 +21,23 @@ const char* const kDllCandidates[] = {
     "C:/Program Files/Steam/steamapps/common/Lossless Scaling/Lossless.dll",
 };
 
-bool IsSupportedFormat(DXGI_FORMAT fmt)
+bool UavStoreSupported(ID3D12Device* device, DXGI_FORMAT fmt)
+{
+    if (device == nullptr)
+        return false;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT fs = {};
+    fs.Format = fmt;
+    if (device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs,
+            sizeof(fs)) != S_OK)
+        return false;
+    return (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+}
+
+// Formats the LS graph can consume directly. The shaders sample and
+// store [0,1] floats, so the whole 8-bit UNORM family works;
+// R10G10B10A2 (10-bit backbuffers, e.g. Control) runs the same graph
+// when the device supports typed UAV stores for it.
+bool IsSupportedFormat(ID3D12Device* device, DXGI_FORMAT fmt)
 {
     switch (fmt)
     {
@@ -30,6 +46,8 @@ bool IsSupportedFormat(DXGI_FORMAT fmt)
     case DXGI_FORMAT_B8G8R8A8_UNORM:
     case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         return true;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        return UavStoreSupported(device, fmt);
     default:
         return false;
     }
@@ -94,6 +112,7 @@ struct DumpImpl
     uint64_t remaining = 0;
     uint64_t stamp = 0;
     uint32_t roiW = 0, roiH = 0, roiX = 0, roiY = 0;
+    uint32_t fmt = 0;  // DXGI_FORMAT of the captured resources
     size_t pitch = 0, size = 0;
     std::wstring dir;
     DumpSlot pool[12];
@@ -105,7 +124,56 @@ void DumpSetup(ID3D12Device* device, uint32_t imgW, uint32_t imgH)
     (void) device;
     char buf[64] = {};
     if (GetEnvironmentVariableA("MFG_DUMP", buf, sizeof(buf)) == 0)
-        return;
+    {
+        // fallback: mfg-dump.txt next to this dll. Games launched from
+        // Steam, or relaunching themselves, do not carry custom env
+        // vars; a file survives every launch path.
+        wchar_t modPath[MAX_PATH] = {};
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCWSTR) &DumpSetup, &mod) && mod != nullptr &&
+            GetModuleFileNameW(mod, modPath, MAX_PATH) > 0)
+        {
+            const std::filesystem::path cfg =
+                std::filesystem::path(modPath).parent_path() / L"mfg-dump.txt";
+            FILE* f = _wfopen(cfg.c_str(), L"r");
+            if (f != nullptr)
+            {
+                char lbuf[256] = {};                std::string cnt, dir, roi;
+                while (std::fgets(lbuf, sizeof(lbuf), f) != nullptr)
+                {
+                    std::string line = lbuf;
+                    while (!line.empty() && (line.back() == '\n' ||
+                            line.back() == '\r' || line.back() == ' ' ||
+                            line.back() == '\t'))
+                        line.pop_back();
+                    if (line.empty())
+                        continue;
+                    if (cnt.empty())
+                        cnt = line;
+                    else if (dir.empty())
+                        dir = line;
+                    else if (roi.empty())
+                        roi = line;
+                    else
+                        break;
+                }
+                std::fclose(f);                if (!cnt.empty())
+                {
+                    _putenv_s("MFG_DUMP", cnt.c_str());
+                    if (!dir.empty())
+                        _putenv_s("MFG_DUMP_DIR", dir.c_str());
+                    if (!roi.empty())
+                        _putenv_s("MFG_DUMP_ROI", roi.c_str());
+                    MFG_LOG_INFO("lsfg: dump config loaded from mfg-dump.txt");
+                    strncpy_s(buf, cnt.c_str(), _TRUNCATE);
+                }
+            }
+        }
+        if (buf[0] == 0)
+            return;
+    }
     g_dump.enabled = true;
     g_dump.remaining = (uint64_t) _strtoui64(buf, nullptr, 10);
     g_dump.roiW = imgW < 640 ? imgW : 640;
@@ -140,7 +208,8 @@ void DumpSetup(ID3D12Device* device, uint32_t imgW, uint32_t imgH)
     FILE* mf = _wfopen((outDir.wstring() + L"\\meta.txt").c_str(), L"w");
     if (mf != nullptr)
     {
-        std::fprintf(mf, "%u %u %u\n", g_dump.roiW, g_dump.roiH, 4);
+        std::fprintf(mf, "%u %u %u %u\n", g_dump.roiW, g_dump.roiH, 4,
+            g_dump.fmt);
         std::fclose(mf);
     }
     g_dump.dir = outDir.wstring();
@@ -203,7 +272,10 @@ void DumpCapture(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
         return;
     const D3D12_RESOURCE_DESC rd = real->GetDesc();
     if (g_dump.pitch == 0)
+    {
+        g_dump.fmt = static_cast<uint32_t>(rd.Format);
         DumpSetup(device, (uint32_t) rd.Width, (uint32_t) rd.Height);
+    }
     if (!g_dump.enabled || g_dump.remaining == 0)
         return;
     if (rd.Width < g_dump.roiX + g_dump.roiW ||
@@ -401,10 +473,14 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     auto fallback = [&]()
     {
         ++m_fallbacks;
-        if (outputReal != nullptr && backbuffer != nullptr)
+        // CopyResource needs identical formats; skip mismatches instead
+        // of risking a device removal (the slot keeps its previous content).
+        if (outputReal != nullptr && backbuffer != nullptr &&
+            outputReal->GetDesc().Format == backbuffer->GetDesc().Format)
             CopyFrame(cmdList, outputReal, backbuffer,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        if (outputInterpolated != nullptr && source != nullptr)
+        if (outputInterpolated != nullptr && source != nullptr &&
+            outputInterpolated->GetDesc().Format == source->GetDesc().Format)
             CopyFrame(cmdList, outputInterpolated, source, sourceState);
     };
 
@@ -424,16 +500,31 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         fallback();
         return NVSDK_NGX_Result_Success;
     }
-    if (!IsSupportedFormat(srcDesc.Format))
+    if (!IsSupportedFormat(m_device, srcDesc.Format) ||
+        !IsSupportedFormat(m_device, interpDesc.Format))
     {
         if (!m_formatWarned)
         {
-            MFG_LOG_INFO("lsfg: source format %u not supported yet, "
-                "staying on blend fallback", srcDesc.Format);
+            MFG_LOG_INFO("lsfg: source format %u / interp format %u not "
+                "supported, staying on blend fallback",
+                srcDesc.Format, interpDesc.Format);
             m_formatWarned = true;
         }
         fallback();
         return NVSDK_NGX_Result_Success;
+    }
+    if (srcDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        interpDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        !m_rgb10Logged)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT fs = {};
+        fs.Format = srcDesc.Format;
+        m_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs,
+            sizeof(fs));
+        MFG_LOG_INFO("lsfg: R10G10B10A2 pair accepted, support2=0x%x "
+            "(typed store=%d)", (unsigned) fs.Support2,
+            (int) ((fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0));
+        m_rgb10Logged = true;
     }
 
     uint32_t slices = static_cast<uint32_t>(interpDesc.DepthOrArraySize);

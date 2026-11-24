@@ -24,6 +24,26 @@ namespace fs = std::filesystem;
 
 namespace {
 int W = 0, H = 0, BPP = 4;
+int Fmt = 0;  // DXGI_FORMAT from meta (24 = R10G10B10A2)
+
+// unpack R10G10B10A2 rows into RGBA8 in place so the profile math
+// keeps working on 10-bit dumps
+void Unpack10(std::vector<uint8_t>& img)
+{
+    if (Fmt != 24)
+        return;
+    for (size_t i = 0; i + 4 <= img.size(); i += 4)
+    {
+        const uint32_t v = (uint32_t) img[i] |
+            ((uint32_t) img[i + 1] << 8) |
+            ((uint32_t) img[i + 2] << 16) |
+            ((uint32_t) img[i + 3] << 24);
+        img[i] = (uint8_t) ((v & 0x3FFu) >> 2);
+        img[i + 1] = (uint8_t) (((v >> 10) & 0x3FFu) >> 2);
+        img[i + 2] = (uint8_t) (((v >> 20) & 0x3FFu) >> 2);
+        img[i + 3] = (uint8_t) (((v >> 30) & 3u) * 85u);
+    }
+}
 
 std::vector<uint8_t> LoadRaw(const fs::path& p)
 {
@@ -159,13 +179,13 @@ int main(int argc, char** argv)
     // image meta
     {
         const auto meta = LoadRaw(dir / "meta.txt");
-        if (sscanf((const char*) meta.data(), "%d %d %d", &W, &H, &BPP) != 3) {
+        if (sscanf((const char*) meta.data(), "%d %d %d %d", &W, &H, &BPP, &Fmt) < 3) {
             std::printf("meta.txt unreadable\n");
             return 1;
         }
     }
-    std::printf("2D dump analyze: %s  W=%d H=%d bpp=%d\n",
-                 dir.string().c_str(), W, H, BPP);
+    std::printf("2D dump analyze: %s  W=%d H=%d bpp=%d fmt=%d\n",
+                 dir.string().c_str(), W, H, BPP, Fmt);
     // full ROI (whole dumped image)
     const int M = 12; // profile guard / max shift
     const int x0 = M, x1 = W - M;
@@ -179,9 +199,12 @@ int main(int argc, char** argv)
                 "k", "v dx", "v dy", "a dx", "a dy",
                 "b dx", "b dy");
     for (int k = first; k <= last; ++k) {
-        const auto rk = LoadRaw(dir / ("real_" + std::to_string(k) + ".raw"));
-        const auto ik = LoadRaw(dir / ("interp_" + std::to_string(k) + ".raw"));
-        const auto rn = LoadRaw(dir / ("real_" + std::to_string(k + 1) + ".raw"));
+        auto rk = LoadRaw(dir / ("real_" + std::to_string(k) + ".raw"));
+        auto ik = LoadRaw(dir / ("interp_" + std::to_string(k) + ".raw"));
+        auto rn = LoadRaw(dir / ("real_" + std::to_string(k + 1) + ".raw"));
+        Unpack10(rk);
+        Unpack10(ik);
+        Unpack10(rn);
         if (rk.size() != (size_t) W * H * BPP ||
             ik.size() != (size_t) W * H * BPP ||
             rn.size() != (size_t) W * H * BPP)
