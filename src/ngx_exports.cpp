@@ -51,7 +51,7 @@ void InitLogging()
     initialised = true;
 
     mfg::log::InitFromAddress(reinterpret_cast<const void*>(&InitLogging));
-    MFG_LOG_INFO("MFG provider phase 0 loaded, backend=%s multiplier=%d",
+    MFG_LOG_INFO("HLSFG provider phase 0 loaded, backend=%s multiplier=%d",
                  mfg::BackendName(mfg::g_settings.backend.load()), mfg::g_settings.multiplier.load());
 }
 

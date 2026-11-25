@@ -1,4 +1,4 @@
-// Minimal file logger. Logs to "mfg-provider.log" next to the dll, so it works in any game
+// Minimal file logger. Logs to "hlsfg.log" next to the dll, so it works in any game
 // directory without touching the game or OptiScaler logs.
 #pragma once
 
@@ -11,7 +11,7 @@ namespace mfg
 namespace log
 {
 // Lazily resolves the directory of our own dll (any address inside it works)
-// and opens mfg-provider.log there. Safe to call repeatedly and from either
+// and opens hlsfg.log there. Safe to call repeatedly and from either
 // entry point (OptiPluginInit runs before the NGX surface does).
 void InitFromAddress(const void* addressInsideDll);
 void Write(const char* level, const char* fmt, ...);

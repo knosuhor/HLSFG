@@ -22,6 +22,24 @@ constexpr DXGI_FORMAT kFmtRgba8 = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kFmtR8 = DXGI_FORMAT_R8_UNORM;
 constexpr DXGI_FORMAT kFmtRgba16F = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
+// Concrete SRV/UAV format for a (possibly TYPELESS) texture: descriptor
+// views reject TYPELESS formats, the cast goes to the typed sibling. The
+// underlying tex keeps its raw format so CopyResource stays byte-exact.
+DXGI_FORMAT ConcreteFormat(DXGI_FORMAT fmt)
+{
+    switch (fmt)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    default:
+        return fmt;
+    }
+}
+
 // temporal depth of the alpha combine per mip level (lsfg-vk)
 uint32_t TemporalFor(uint32_t level)
 {
@@ -81,7 +99,7 @@ uint32_t Pipeline::AllocSlots(uint32_t count, const char*)
 void Pipeline::WriteSrv(uint32_t slot, const Tex& tex)
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
-    desc.Format = tex.fmt;
+    desc.Format = ConcreteFormat(tex.fmt);
     desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     desc.Texture2D.MipLevels = 0xFFFFFFFF; // -1 = all mips (0 is invalid)
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -92,7 +110,7 @@ void Pipeline::WriteSrv(uint32_t slot, const Tex& tex)
 void Pipeline::WriteUav(uint32_t slot, const Tex& tex)
 {
     D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
-    desc.Format = tex.fmt;
+    desc.Format = ConcreteFormat(tex.fmt);
     desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     m_device->CreateUnorderedAccessView(tex.res.Get(), nullptr, &desc,
         {m_heap->GetCPUDescriptorHandleForHeapStart().ptr + m_heapIncrement * slot});
@@ -109,7 +127,7 @@ void Pipeline::WriteExternalUav(uint32_t slot, ID3D12Resource* res,
         return;
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
-    desc.Format = fmt;
+    desc.Format = ConcreteFormat(fmt);
     if (rd.DepthOrArraySize > 1)
     {
         desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
@@ -190,7 +208,7 @@ void Pipeline::RecordClears(ID3D12GraphicsCommandList* cmd)
             // ClearUnorderedAccessView* demands a CPU handle that lives
             // in a non-shader-visible heap; mirror the UAV descriptor there.
             D3D12_UNORDERED_ACCESS_VIEW_DESC cdesc{};
-            cdesc.Format = tex.fmt;
+            cdesc.Format = ConcreteFormat(tex.fmt);
             cdesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             m_device->CreateUnorderedAccessView(tex.res.Get(), nullptr, &cdesc,
                 {m_cpuHeap->GetCPUDescriptorHandleForHeapStart().ptr +
@@ -324,10 +342,11 @@ bool Pipeline::Init(ID3D12Device* device, ShaderBank& bank,
         if (m_mips[lvl] == nullptr)
             return false;
     }
-    // The ring pair holds byte-exact copies of the source frame: it must be
-    // created in the source format family or CopyResource is invalid (BGRA8
-    // is the measured swapchain/slot family). UAV clears/casts above rely
-    // on the clear+SRV path only where the format allows it.
+    // The ring pair holds byte-exact copies of the source frame: it keeps
+    // the raw source format (TYPELESS included) so CopyResource
+    // resource-to-resource stays exact, while SRV/UAV views cast the
+    // TYPELESS variants to their typed sibling. UAV clears/casts above
+    // rely on the clear+SRV path only where the format allows it.
     m_source[0] = CreateTex(sourceFormat, sourceExtent, "source even");
     m_source[1] = CreateTex(sourceFormat, sourceExtent, "source odd");
     if (m_source[0] == nullptr || m_source[1] == nullptr)
@@ -666,7 +685,7 @@ void Pipeline::RecordPrepassOnly(ID3D12GraphicsCommandList* cmd, uint64_t fidx, 
         {
             const Tex& t = *m_mips[static_cast<size_t>(lvl)];
             D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-            ud.Format = t.fmt;
+            ud.Format = ConcreteFormat(t.fmt);
             ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             const D3D12_CPU_DESCRIPTOR_HANDLE cpu{
                 dbgCpu->GetCPUDescriptorHandleForHeapStart().ptr +

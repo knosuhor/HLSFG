@@ -38,28 +38,61 @@ void Draw(void* /*userData*/)
                           "interpolated. Boot-to-exit stability is the phase 0.5 target.");
     else
         api->TextDisabled("Real frames only. The passthrough backend validates the contract "
-                          "and writes mfg-provider.log next to the dll.");
+                          "and writes hlsfg.log next to the dll.");
 
-    api->Section("Frame generation");
-    int multiplier = mfg::g_settings.multiplier.load();
-    if (api->SliderInt("Multiplier##mfg", &multiplier, 2, 4, "%dx"))
-    {
-        mfg::g_settings.multiplier.store(multiplier);
-        api->ItemTooltip("Reported to OptiScaler as DLSSG.MultiFrameCountMax. "
-                         "Applies after a game restart.");
-    }
+    api->Section("Options");
+    api->TextDisabled("The FG multiplier lives in the FrameGen tab; with a replacement "
+                      "active OptiScaler overrides whatever a provider reports.");
 
     int flow = mfg::g_settings.lsFlow.load();
     if (api->SliderInt("Flow scale##mfg", &flow, 1, 4, "1/%d"))
-    {
         mfg::g_settings.lsFlow.store(flow);
-        api->ItemTooltip("LSFG optical flow resolution divisor (lower = higher quality, "
-                         "higher = faster). Matches the Lossless Scaling flow scale. "
-                         "Applies after a game restart.");
-    }
+    api->ItemTooltip("LSFG optical flow resolution divisor (lower = higher quality, "
+                     "higher = faster). OptiScaler has no counterpart for this option; "
+                     "it is specific to the LSFG backend. When never changed here it "
+                     "tracks the FrameGen multiplier (2x = 1/2, 4x = 1/4). "
+                     "Applies after a game restart.");
+
+    bool uiComposite = mfg::g_settings.uiComposite.load();
+    if (api->Checkbox("UI recomposition (hudless)##mfg", &uiComposite))
+        mfg::g_settings.uiComposite.store(uiComposite);
+    api->ItemTooltip("With a HUD-less capture available (Advanced -> disable hudless off), "
+                     "UI is detected from (backbuffer - hudless) of the current frame and "
+                     "layered onto the generated frames, so HUD and menus stay sharp. "
+                     "Without a HUDLess resource the pass stays inactive.");
+
+    bool temporalUi = mfg::g_settings.temporalUi.load();
+    if (api->Checkbox("Temporal UI mask (experimental)##mfg", &temporalUi))
+        mfg::g_settings.temporalUi.store(temporalUi);
+    api->ItemTooltip("Applies only when no usable HUDLess capture exists (broken or "
+                     "not tagged): pixels that did not change between real frames are "
+                     "taken sharp from the current frame instead of being interpolated. "
+                     "The per-pixel threshold has no temporal state, so it can introduce "
+                     "judder in low-contrast motion; uncheck for pure interpolation "
+                     "(HUD slightly warped during camera motion).");
+
+    api->Section("Hudless input");
+    const char* invModes[] = { "Auto-detect", "Inverted (255 - x)", "Direct" };
+    bool invDisabled[] = { false, false, false };
+    int hudlessInvert = mfg::g_settings.hudlessInvert.load();
+    if (api->Combo("HUDLess storage##mfg", &hudlessInvert, invModes, 3, invDisabled))
+        mfg::g_settings.hudlessInvert.store(hudlessInvert);
+    api->ItemTooltip("Auto-detect probes the first frames and negates such input before frame "
+                     "generation, so the interpolator sees true colors. Applies after a game restart.");
+
+    const int hudHealth = mfg::g_hudlessHealth.load();
+    api->TextDisabled(hudHealth == 2
+        ? "HUDLess capture broken (static/garbage): interpolating the backbuffer this session."
+        : hudHealth == 1
+            ? "HUDLess capture healthy this session."
+            : "HUDLess capture not measured yet.");
+    api->ItemTooltip("The provider probes the tagged HUDLessColor against the backbuffer "
+                     "(content, structure and frame-to-frame tracking). An input that does "
+                     "not track the scene is dropped for the rest of the session and the "
+                     "frames are generated straight from the backbuffer.");
 
     bool fileLog = mfg::g_settings.fileLog.load();
-    if (api->Checkbox("Write mfg-provider.log##mfg", &fileLog))
+    if (api->Checkbox("Write hlsfg.log##mfg", &fileLog))
         mfg::g_settings.fileLog.store(fileLog);
 
     if (api->ItemDeactivatedAfterEdit())
@@ -68,9 +101,13 @@ void Draw(void* /*userData*/)
         api->SetInt(plugin, "Multiplier", mfg::g_settings.multiplier.load());
         api->SetInt(plugin, "Flow", mfg::g_settings.lsFlow.load());
         api->SetBool(plugin, "FileLog", mfg::g_settings.fileLog.load());
+        api->SetBool(plugin, "UiComposite", mfg::g_settings.uiComposite.load());
+        api->SetBool(plugin, "TemporalUi", mfg::g_settings.temporalUi.load());
+        api->SetInt(plugin, "HudlessInvert", mfg::g_settings.hudlessInvert.load());
+        // UiCutoff stays internal (tunable via the ini key only, default 2).
         api->SaveSettings(plugin);
         if (OPTI_API_HAS(api, Log))
-            api->Log(plugin, OptiLog_Info, "MFG provider settings saved");
+            api->Log(plugin, OptiLog_Info, "HLSFG provider settings saved");
     }
 }
 } // namespace
@@ -88,15 +125,27 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const OptiPluginApi* api, O
     g_plugin = plugin;
 
     mfg::g_settings.backend.store(api->GetInt(plugin, "Backend", static_cast<int>(mfg::BackendKind::Passthrough)));
-    mfg::g_settings.multiplier.store(api->GetInt(plugin, "Multiplier", 2));
-    mfg::g_settings.lsFlow.store(api->GetInt(plugin, "Flow", 2));
+    // The multiplier is only reported as DLSSG.MultiFrameCountMax; with an
+    // nvngx replacement active OptiScaler overrides it with the FrameGen
+    // tab value, so it is not duplicated in this tab. The LS flow scale
+    // is provider-specific: pinned when the tab slider saved a value,
+    // else it tracks the multiplier (2x = 1/2, 4x = 1/4), which measured
+    // best in sessions.
+    const int multiplier = api->GetInt(plugin, "Multiplier", 2);
+    mfg::g_settings.multiplier.store(multiplier);
+    const int flow = api->GetInt(plugin, "Flow", 0);
+    mfg::g_settings.lsFlow.store(flow > 0 ? flow : multiplier);
     mfg::g_settings.fileLog.store(api->GetBool(plugin, "FileLog", true));
+    mfg::g_settings.uiComposite.store(api->GetBool(plugin, "UiComposite", true));
+    mfg::g_settings.temporalUi.store(api->GetBool(plugin, "TemporalUi", false));
+    mfg::g_settings.uiCutoff.store(api->GetInt(plugin, "UiCutoff", 2));
+    mfg::g_settings.hudlessInvert.store(api->GetInt(plugin, "HudlessInvert", 0));
 
-    api->RegisterTab(plugin, "MFG Provider", "Multi-frame generation provider (phases 0-1)", Draw,
+    api->RegisterTab(plugin, "HLSFG", "HUD-less FG: LSFG shaders below the GUI, UI recomposed from the hudless delta", Draw,
                      nullptr);
 
     if (OPTI_API_HAS(api, Log))
-        api->Log(plugin, OptiLog_Info, "MFG provider: backend ready");
+        api->Log(plugin, OptiLog_Info, "HLSFG provider: backend ready");
 
     MFG_LOG_INFO("OptiPluginInit (plugin api v%u), backend=%s multiplier=%d", api->version,
                  mfg::BackendName(mfg::g_settings.backend.load()), mfg::g_settings.multiplier.load());

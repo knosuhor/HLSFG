@@ -59,7 +59,7 @@ void Write(const char* level, const char* fmt, ...)
         return;
 
     wchar_t path[MAX_PATH];
-    swprintf(path, MAX_PATH, L"%s\\mfg-provider.log", g_logDir.c_str());
+    swprintf(path, MAX_PATH, L"%s\\hlsfg.log", g_logDir.c_str());
     HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)

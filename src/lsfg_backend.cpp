@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
 
 namespace mfg
@@ -21,6 +22,42 @@ const char* const kDllCandidates[] = {
     "C:/Program Files/Steam/steamapps/common/Lossless Scaling/Lossless.dll",
 };
 
+// Game root next to OptiScaler.dll: our module lives in
+// <root>/custom/<name>/dlssg/nvngx_dlssg.dll, so four parent_path()
+// hops reach the root. Sanity-checked by OptiScaler.ini next to it
+// so test harnesses and odd layouts never make a bogus candidate.
+std::filesystem::path GameRootFromModule()
+{
+    wchar_t modPath[MAX_PATH] = {};
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR) &GameRootFromModule, &mod) == 0 ||
+        mod == nullptr || GetModuleFileNameW(mod, modPath, MAX_PATH) == 0)
+        return {};
+    const std::filesystem::path p = std::filesystem::path(modPath)
+        .parent_path().parent_path().parent_path().parent_path();
+    std::error_code ec;
+    if (!std::filesystem::exists(p / "OptiScaler.ini", ec) || ec)
+        return {};
+    return p;
+}
+
+// hudless availability tracking across burst evaluates (logging only)
+uint64_t g_nullStreak = 0;
+
+// Garbage hudless detection thresholds. A tagged HUDLessColor that does
+// not track the backbuffer must not feed the interpolator: Cyberpunk
+// 2077 tags a static near-white dummy while the scene is dark, Control
+// tags a frozen frame. All numbers are measured on the 256x128 ROI
+// probe (byte-decodable formats only), byte scale 0..255.
+constexpr double kContentBreak = 0.30;  // |mean(bb)-mean(hud)| gap
+constexpr double kSceneVarMin  = 100.0; // bb variance so the scene has structure
+constexpr double kHudVarRatio  = 0.25;  // hudless variance vs bb (flat dummy)
+constexpr uint64_t kProbeSpacing = 300; // calls between freshness probes
+constexpr double kBbMotion = 0.01;      // bb mean change across a probe pair
+constexpr double kStaleRatio = 0.25;    // hudless change vs bb change
+
 bool UavStoreSupported(ID3D12Device* device, DXGI_FORMAT fmt)
 {
     if (device == nullptr)
@@ -33,21 +70,71 @@ bool UavStoreSupported(ID3D12Device* device, DXGI_FORMAT fmt)
     return (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
 }
 
+// Concrete view format for a (possibly TYPELESS) resource: SRV and UAV
+// descriptors reject TYPELESS formats, so views must use the fully typed
+// sibling (games commonly tag their hudless as R8G8B8A8_TYPELESS).
+DXGI_FORMAT ConcreteFormat(DXGI_FORMAT fmt)
+{
+    switch (fmt)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    default:
+        return fmt;
+    }
+}
+
+// Family base of a format: members of one family share the byte layout,
+// so CopyResource between them (and between a TYPELESS resource and its
+// typed sibling) is a valid typeless cast.
+DXGI_FORMAT FamilyFormat(DXGI_FORMAT fmt)
+{
+    switch (fmt)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    default:
+        return fmt;
+    }
+}
+
+bool SameFamily(DXGI_FORMAT a, DXGI_FORMAT b)
+{
+    return FamilyFormat(a) == FamilyFormat(b);
+}
+
 // Formats the LS graph can consume directly. The shaders sample and
-// store [0,1] floats, so the whole 8-bit UNORM family works;
-// R10G10B10A2 (10-bit backbuffers, e.g. Control) runs the same graph
-// when the device supports typed UAV stores for it.
+// store [0,1] floats, so the whole 8-bit UNORM family works, including
+// its TYPELESS variants (viewed as the typed sibling); R10G10B10A2
+// (10-bit backbuffers, e.g. Control) runs the same graph when the
+// device supports typed UAV stores for it.
 bool IsSupportedFormat(ID3D12Device* device, DXGI_FORMAT fmt)
 {
     switch (fmt)
     {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
     case DXGI_FORMAT_R8G8B8A8_UNORM:
     case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
     case DXGI_FORMAT_B8G8R8A8_UNORM:
     case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         return true;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
     case DXGI_FORMAT_R10G10B10A2_UNORM:
-        return UavStoreSupported(device, fmt);
+        return UavStoreSupported(device, DXGI_FORMAT_R10G10B10A2_UNORM);
     default:
         return false;
     }
@@ -339,7 +426,7 @@ void DumpCapture(ID3D12Device* device, ID3D12GraphicsCommandList* cmdList,
         dst.pResource = s.rb[j].Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         dst.PlacedFootprint.Offset = 0;
-        dst.PlacedFootprint.Footprint.Format = rd.Format;
+        dst.PlacedFootprint.Footprint.Format = ConcreteFormat(rd.Format);
         dst.PlacedFootprint.Footprint.Width = g_dump.roiW;
         dst.PlacedFootprint.Footprint.Height = g_dump.roiH;
         dst.PlacedFootprint.Footprint.Depth = 1;
@@ -379,6 +466,14 @@ NVSDK_NGX_Result LsfgBackend::InitD3D12(ID3D12Device* device)
                 dll = std::filesystem::path(candidate);
                 break;
             }
+        }
+        // last resort: Lossless.dll dropped into the game root
+        if (dll.empty())
+        {
+            const std::filesystem::path root = GameRootFromModule();
+            const std::filesystem::path cand = root / "Lossless.dll";
+            if (!root.empty() && std::filesystem::exists(cand))
+                dll = cand;
         }
     }
     if (dll.empty())
@@ -430,17 +525,316 @@ bool LsfgBackend::EnsurePipeline(uint32_t width, uint32_t height,
     m_pipelineReady = true;
     return true;
 }
+
+void LsfgBackend::CompositeUi(ID3D12GraphicsCommandList* cmdList,
+    ID3D12Resource* ringSlot, ID3D12Resource* backbuffer,
+    ID3D12Resource* interp, const D3D12_RESOURCE_DESC& interpDesc,
+    uint32_t mode)
+{
+    if (!g_settings.uiComposite.load() || ringSlot == nullptr ||
+        backbuffer == nullptr || interp == nullptr)
+        return;
+    if (!m_ui.Ready() && !m_uiFailed)
+    {
+        if (!m_ui.Init(m_device))
+        {
+            m_uiFailed = true;
+            MFG_LOG_INFO("ui: composite disabled (init failed)");
+        }
+        else if (m_calls <= 3)
+        {
+            MFG_LOG_INFO("lsfg: stage=ui-ready");
+        }
+    }
+    if (!m_ui.Ready())
+        return;
+    const float cutoff =
+        static_cast<float>(g_settings.uiCutoff.load()) / 100.0f;
+    m_ui.Dispatch(cmdList, ringSlot, backbuffer, interp,
+        static_cast<uint32_t>(interpDesc.Width),
+        static_cast<uint32_t>(interpDesc.Height), cutoff, mode);
+    if (mode != 0 && !m_temporalLogged)
+    {
+        m_temporalLogged = true;
+        MFG_LOG_INFO("lsfg: stage=ui-temporal (no usable hudless: UI "
+            "masked from consecutive backbuffers)");
+    }
+    if (m_calls <= 3)
+        MFG_LOG_INFO("lsfg: stage=ui-composite");
+}
+
+// Queue one polarity probe: small centered ROI copies of the backbuffer
+// and the hudless into readback buffers, drained a few evaluates later.
+bool LsfgBackend::InvProbe(ID3D12GraphicsCommandList* cmd,
+    ID3D12Resource* bb, ID3D12Resource* hudless)
+{
+    if (cmd == nullptr || bb == nullptr || hudless == nullptr ||
+        m_device == nullptr || m_invRbQueued)
+        return false;
+    const D3D12_RESOURCE_DESC bd = bb->GetDesc();
+    const D3D12_RESOURCE_DESC hd = hudless->GetDesc();
+    if (bd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        hd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        bd.Width != hd.Width || bd.Height != hd.Height)
+        return false;
+    // the byte vote needs byte-decodable formats (a 10-bit packed layout
+    // would compare channel bits, not colors)
+    const DXGI_FORMAT fam = FamilyFormat(bd.Format);
+    if (fam != DXGI_FORMAT_R8G8B8A8_TYPELESS &&
+        fam != DXGI_FORMAT_B8G8R8A8_TYPELESS)
+        return false;
+    if (m_invPitch == 0)
+    {
+        m_invRoiW = bd.Width < 256 ? (uint32_t) bd.Width : 256;
+        m_invRoiH = bd.Height < 128 ? (uint32_t) bd.Height : 128;
+        m_invPitch = ((size_t) m_invRoiW * 4 + 255) & ~(size_t) 255;
+        m_invSize = m_invPitch * m_invRoiH + 512;
+    }
+    if (!m_invRb[0])
+    {
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = m_invSize;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bool ok = SUCCEEDED(m_device->CreateCommittedResource(&hp,
+                D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr, IID_PPV_ARGS(&m_invRb[0])));
+        if (ok)
+            ok = SUCCEEDED(m_device->CreateCommittedResource(&hp,
+                    D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&m_invRb[1])));
+        if (!ok)
+        {
+            m_invRb[0].Reset();
+            m_invRb[1].Reset();
+            m_invResolved = true; // give up: stay on direct copies
+            MFG_LOG_INFO("lsfg: hudless autodetect unavailable "
+                "(readback alloc failed), staying direct");
+            return false;
+        }
+    }
+    ID3D12Resource* src[2] = {bb, hudless};
+    const D3D12_RESOURCE_BARRIER pre[] = {
+        Transition(bb, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COPY_SOURCE),
+        Transition(hudless, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_COPY_SOURCE),
+    };
+    cmd->ResourceBarrier(2, pre);
+    const UINT x0 = bd.Width > m_invRoiW
+        ? (UINT) ((bd.Width - m_invRoiW) / 2) : 0;
+    const UINT y0 = bd.Height > m_invRoiH
+        ? (UINT) ((bd.Height - m_invRoiH) / 2) : 0;
+    for (int j = 0; j < 2; ++j)
+    {
+        D3D12_TEXTURE_COPY_LOCATION s{};
+        s.pResource = src[j];
+        s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        s.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION d{};
+        d.pResource = m_invRb[j].Get();
+        d.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        d.PlacedFootprint.Offset = 0;
+        d.PlacedFootprint.Footprint.Format = ConcreteFormat(bd.Format);
+        d.PlacedFootprint.Footprint.Width = m_invRoiW;
+        d.PlacedFootprint.Footprint.Height = m_invRoiH;
+        d.PlacedFootprint.Footprint.Depth = 1;
+        d.PlacedFootprint.Footprint.RowPitch = (UINT) m_invPitch;
+        D3D12_BOX box{x0, y0, 0, x0 + m_invRoiW, y0 + m_invRoiH, 1};
+        cmd->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
+    }
+    const D3D12_RESOURCE_BARRIER post[] = {
+        Transition(bb, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        Transition(hudless, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_COPY_DEST),
+    };
+    cmd->ResourceBarrier(2, post);
+    m_invRbQueued = true;
+    m_invQueuedCall = m_calls;
+    return true;
+}
+
+// Content verdict on one drained sample pair: a garbage hudless reads
+// as a huge mean-luma gap from the backbuffer while being optically
+// flat (variance far below the scene's own structure).
+static bool HudlessContentGarbage(double meanB, double meanH,
+    double varB, double varH)
+{
+    const double content = std::fabs(meanB - meanH) / 255.0;
+    return content > kContentBreak && varB > kSceneVarMin &&
+        varH < kHudVarRatio * varB;
+}
+
+// Map a queued probe once the copies have certainly finished. The
+// sample feeds three estimates: the polarity vote (direct vs
+// complemented bytes), the startup content verdict (3 samples) and
+// the periodic freshness verdict (probe pairs spaced ~300 calls).
+void LsfgBackend::InvDrain()
+{
+    if (!m_invRbQueued || m_invRb[0] == nullptr || m_invRb[1] == nullptr)
+        return;
+    if (m_calls - m_invQueuedCall < 3)
+        return;
+    uint8_t* pb = nullptr;
+    uint8_t* ph = nullptr;
+    const D3D12_RANGE none{0, 0};
+    if (FAILED(m_invRb[0]->Map(0, &none,
+            reinterpret_cast<void**>(&pb))))
+        return; // try again on a later evaluate
+    if (FAILED(m_invRb[1]->Map(0, &none,
+            reinterpret_cast<void**>(&ph))))
+    {
+        m_invRb[0]->Unmap(0, nullptr);
+        m_invRbQueued = false; // re-queue a fresh probe
+        return;
+    }
+    const size_t rowBytes = (size_t) m_invRoiW * 4;
+    double direct = 0.0, inverted = 0.0;
+    double sumB = 0.0, sumH = 0.0, sumB2 = 0.0, sumH2 = 0.0;
+    uint64_t count = 0;
+    for (uint32_t y = 0; y < m_invRoiH; ++y)
+    {
+        const uint8_t* rb = pb + (size_t) y * m_invPitch;
+        const uint8_t* rh = ph + (size_t) y * m_invPitch;
+        for (size_t i = 0; i < rowBytes; ++i)
+        {
+            const double b = rb[i];
+            const double h = rh[i];
+            direct += (b > h) ? (b - h) : (h - b);
+            inverted += (b > 255 - h) ? (b - (255 - h))
+                                      : ((255 - h) - b);
+            sumB += b;
+            sumH += h;
+            sumB2 += b * b;
+            sumH2 += h * h;
+        }
+        count += rowBytes;
+    }
+    m_invRb[0]->Unmap(0, nullptr);
+    m_invRb[1]->Unmap(0, nullptr);
+    m_invRbQueued = false;
+
+    const double n = (double) count;
+    const double meanB = sumB / n;
+    const double meanH = sumH / n;
+    const double varB = sumB2 / n - meanB * meanB;
+    const double varH = sumH2 / n - meanH * meanH;
+
+    if (!m_startupProbed)
+    {
+        // startup: three samples, then the content verdict
+        m_startMeanB += meanB;
+        m_startMeanH += meanH;
+        m_startVarB += varB;
+        m_startVarH += varH;
+        m_invDirect += direct / n / 255.0;
+        m_invInverted += inverted / n / 255.0;
+        ++m_invSamples;
+        if (m_invSamples < 3)
+            return;
+        m_startupProbed = true;
+        const double sB = m_startMeanB / 3.0;
+        const double sH = m_startMeanH / 3.0;
+        const double vB = m_startVarB / 3.0;
+        const double vH = m_startVarH / 3.0;
+        const double content = std::fabs(sB - sH) / 255.0;
+        if (HudlessContentGarbage(sB, sH, vB, vH))
+        {
+            m_hudlessBroken = true;
+            g_hudlessHealth.store(2);
+            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
+                "varH=%.0f -> garbage, interpolating the backbuffer "
+                "(rest of session)", content, vB, vH);
+            m_invRb[0].Reset();
+            m_invRb[1].Reset();
+            return;
+        }
+        g_hudlessHealth.store(1);
+        if (content > kContentBreak && vB <= kSceneVarMin)
+            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f but scene "
+                "flat (varB=%.0f) -> inconclusive, periodic probes "
+                "continue", content, vB);
+        else
+            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
+                "varH=%.0f -> healthy", content, vB, vH);
+        if (!m_invResolved)
+        {
+            const double d = m_invDirect / m_invSamples;
+            const double v = m_invInverted / m_invSamples;
+            m_invActive = (v * 1.25 < d);
+            m_invResolved = true;
+            MFG_LOG_INFO("lsfg: hudless polarity autodetect: "
+                "L1 direct=%.4f inverted=%.4f (%u samples) -> invert %s",
+                d, v, m_invSamples, m_invActive ? "ON" : "OFF");
+        }
+        return;
+    }
+
+    // periodic freshness pair: compare against the previous sample
+    ++m_probeCount;
+    if (HudlessContentGarbage(meanB, meanH, varB, varH))
+    {
+        m_hudlessBroken = true;
+        g_hudlessHealth.store(2);
+        MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
+            "varH=%.0f -> garbage (probe %u), interpolating the "
+            "backbuffer (rest of session)",
+            std::fabs(meanB - meanH) / 255.0, varB, varH, m_probeCount);
+        m_invRb[0].Reset();
+        m_invRb[1].Reset();
+        return;
+    }
+    if (m_periodicBb >= 0.0)
+    {
+        const double moved = std::fabs(meanB - m_periodicBb) / 255.0;
+        const double hudMoved = std::fabs(meanH - m_periodicHud) / 255.0;
+        if (moved > kBbMotion && hudMoved < kStaleRatio * moved)
+        {
+            m_hudlessBroken = true;
+            g_hudlessHealth.store(2);
+            MFG_LOG_INFO("lsfg: hudless sanity: backbuffer moved %.3f "
+                "while hudless moved %.4f (probe %u) -> stale, "
+                "interpolating the backbuffer (rest of session)",
+                moved, hudMoved, m_probeCount);
+            m_invRb[0].Reset();
+            m_invRb[1].Reset();
+            return;
+        }
+        if ((m_probeCount % 10) == 1)
+            MFG_LOG_INFO("lsfg: hudless sanity ok (probe %u: bb moved "
+                "%.3f, hud moved %.4f)", m_probeCount, moved, hudMoved);
+    }
+    m_periodicBb = meanB;
+    m_periodicHud = meanH;
+}
 NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         NVSDK_NGX_Parameter* params)
 {
     ++m_calls;
     DumpDrain(false);
+    InvDrain();
 
     ID3D12Resource* backbuffer = GetResource(params, "DLSSG.Backbuffer");
     ID3D12Resource* hudless = GetResource(params, "DLSSG.HUDLess");
     ID3D12Resource* outputReal = GetResource(params, "DLSSG.OutputReal");
     ID3D12Resource* outputInterpolated =
         GetResource(params, "DLSSG.OutputInterpolated");
+
+    // Garbage hudless verdict (sanity probes): once broken, drop the
+    // tagged input everywhere and let the pipeline interpolate the raw
+    // backbuffer, exactly like an untagged game. The tagged pointer is
+    // kept for probe scheduling and tag-presence logging.
+    ID3D12Resource* const taggedHudless = hudless;
+    if (m_hudlessBroken)
+        hudless = nullptr;
 
     // slot identity: pointer-bits contract measured against OptiScaler
     void* rawIndex = nullptr;
@@ -468,21 +862,69 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
             (void*) hudless, (void*) backbuffer, (void*) outputReal,
             (void*) outputInterpolated);
 
+    // once per session: which optional nvngx inputs the host provides
+    // (DLSSG.UI/UIAlpha would allow exact UI recomposition without a
+    // usable hudless; logged so the next session can decide)
+    if (m_calls == 5)
+    {
+        static const char* const kOptionalInputs[] = {
+            "DLSSG.UI", "DLSSG.UIAlpha", "DLSSG.NoWarp",
+            "DLSSG.BidirectionalDistortionField",
+        };
+        bool any = false;
+        for (const char* key : kOptionalInputs)
+        {
+            ID3D12Resource* r = GetResource(params, key);
+            if (r != nullptr)
+            {
+                MFG_LOG_INFO("lsfg: nvngx optional input %s present (%p)",
+                    key, (void*) r);
+                any = true;
+            }
+        }
+        if (!any)
+            MFG_LOG_INFO("lsfg: nvngx optional inputs "
+                "(UI/UIAlpha/NoWarp/DistortionField) all absent");
+    }
+
     // Blend-style fill used whenever the graph cannot run (first frame,
     // unsupported format, one-Evaluate-per-slot mode, init failure).
     auto fallback = [&]()
     {
         ++m_fallbacks;
-        // CopyResource needs identical formats; skip mismatches instead
-        // of risking a device removal (the slot keeps its previous content).
+        // CopyResource is valid between TYPELESS and typed members of the
+        // same family (typeless casting); skip everything else instead of
+        // risking a device removal (the slot keeps its previous content).
         if (outputReal != nullptr && backbuffer != nullptr &&
-            outputReal->GetDesc().Format == backbuffer->GetDesc().Format)
+            SameFamily(outputReal->GetDesc().Format,
+                backbuffer->GetDesc().Format))
             CopyFrame(cmdList, outputReal, backbuffer,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         if (outputInterpolated != nullptr && source != nullptr &&
-            outputInterpolated->GetDesc().Format == source->GetDesc().Format)
+            SameFamily(outputInterpolated->GetDesc().Format,
+                source->GetDesc().Format))
             CopyFrame(cmdList, outputInterpolated, source, sourceState);
     };
+
+    // hudless availability stretches: some game phases (menus and
+    // loading screens) stop tagging HUDLessColor; log the transitions
+    // so dump sessions can be correlated with the exact mode.
+    if (burst)
+    {
+        if (taggedHudless == nullptr)
+        {
+            if (g_nullStreak == 0)
+                MFG_LOG_INFO("lsfg: hudless=null stretch begins "
+                    "(call#%llu)", m_calls);
+            ++g_nullStreak;
+        }
+        else if (g_nullStreak > 0)
+        {
+            MFG_LOG_INFO("lsfg: hudless back after %llu null groups",
+                g_nullStreak);
+            g_nullStreak = 0;
+        }
+    }
 
     if (!burst || source == nullptr || cmdList == nullptr ||
         outputInterpolated == nullptr)
@@ -544,9 +986,66 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         return NVSDK_NGX_Result_Success;
     }
 
+    // The ring was built in the first supported source format; a source
+    // from a different family could not be copied into it (the fallback
+    // keeps the previous slot content instead of risking a device removal).
+    if (m_pipeline.Source(0) == nullptr ||
+        !SameFamily(m_pipeline.Source(0)->GetDesc().Format, srcDesc.Format))
+    {
+        fallback();
+        return NVSDK_NGX_Result_Success;
+    }
+
+    // hudless polarity (some games tag HUDLessColor complemented,
+    // 255 - color bytes; auto mode resolves after the startup probe
+    // samples, forced modes right here) and hudless garbage detection:
+    // a tagged input that does not track the backbuffer (static white
+    // dummy measured in Cyberpunk 2077, frozen frame in Control) is
+    // dropped for the rest of the session by the probe drain.
+    if (!m_invResolved)
+    {
+        if (m_invMode < 0)
+            m_invMode = g_settings.hudlessInvert.load();
+        if (m_invMode == 1 || m_invMode == 2)
+        {
+            m_invActive = (m_invMode == 1);
+            m_invResolved = true;
+            MFG_LOG_INFO("lsfg: hudless invert %s (forced)",
+                m_invActive ? "ON" : "OFF");
+        }
+    }
+    // probe scheduling: three startup samples, then freshness pairs
+    // spaced kProbeSpacing calls apart (readback drained 3 calls later)
+    if (taggedHudless != nullptr && backbuffer != nullptr &&
+        !m_hudlessBroken &&
+        (!m_startupProbed ||
+         m_calls - m_lastProbeCall >= kProbeSpacing))
+    {
+        if (InvProbe(cmdList, backbuffer, taggedHudless))
+            m_lastProbeCall = m_calls;
+    }
+
     // ring: store the incoming frame into slot (fidx & 1)
     ID3D12Resource* ring = m_pipeline.Source(
         static_cast<uint32_t>(m_fidx & 1));
+    bool inverted = false;
+    if (m_invActive && !m_invertFailed && hudless != nullptr &&
+        SameFamily(source->GetDesc().Format, ring->GetDesc().Format))
+    {
+        if (!m_invert.Ready() && !m_invert.Init(m_device))
+        {
+            m_invertFailed = true;
+            MFG_LOG_ERROR("lsfg: invert pass init failed, staying on "
+                "direct copies");
+        }
+        else
+        {
+            m_invert.Dispatch(cmdList, source, sourceState, sourceState,
+                ring);
+            inverted = true;
+        }
+    }
+    if (!inverted)
     {
         const D3D12_RESOURCE_BARRIER pre[] = {
             Transition(ring, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -570,6 +1069,10 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
             MFG_LOG_INFO("lsfg: stage=clears");
         m_pipeline.RecordClears(cmdList);
         fallback();
+        if (hudless != nullptr)
+            CompositeUi(cmdList,
+                m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)),
+                backbuffer, outputInterpolated, interpDesc, 0);
     }
     else
     {
@@ -588,13 +1091,24 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
             // the interpolated pair. Filling it with the previous ring
             // frame shifts half the presented slots back in time
             // (visible oscillation under camera/character motion).
-            if (outputReal->GetDesc().Format ==
-                backbuffer->GetDesc().Format)
+            if (SameFamily(outputReal->GetDesc().Format,
+                    backbuffer->GetDesc().Format))
             {
                 CopyFrame(cmdList, outputReal, backbuffer,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             }
         }
+        if (hudless != nullptr)
+            CompositeUi(cmdList,
+                m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)),
+                backbuffer, outputInterpolated, interpDesc, 0);
+        else if (g_settings.temporalUi.load())
+            // experimental, opt-in: temporal UI mask from the previous
+            // backbuffer held in the ring (no usable hudless); the
+            // per-pixel threshold can judder, so it is off by default
+            CompositeUi(cmdList,
+                m_pipeline.Source(static_cast<uint32_t>((m_fidx + 1) & 1)),
+                backbuffer, outputInterpolated, interpDesc, 1);
     }
 
     DumpCapture(m_device, cmdList, m_fidx, outputReal, outputInterpolated,
@@ -610,8 +1124,40 @@ void LsfgBackend::Shutdown()
         "%llu generated groups, %llu blend fallbacks",
         m_calls, m_generations, m_fallbacks);
     DumpDrain(true);
+    m_ui.Release();
+    m_uiFailed = false;
+    m_invert.Release();
+    m_invertFailed = false;
     m_fidx = 0;
     m_pipelineReady = false;
     m_device = nullptr;
+    // hudless polarity is probed fresh per session (games and render
+    // paths can differ between them); the garbage verdict is too
+    m_invMode = -1;
+    m_invResolved = false;
+    m_invActive = false;
+    m_invRbQueued = false;
+    m_invQueuedCall = 0;
+    m_invSamples = 0;
+    m_invDirect = 0.0;
+    m_invInverted = 0.0;
+    m_invRoiW = 0;
+    m_invRoiH = 0;
+    m_invPitch = 0;
+    m_invSize = 0;
+    m_startupProbed = false;
+    m_hudlessBroken = false;
+    m_lastProbeCall = 0;
+    m_probeCount = 0;
+    m_temporalLogged = false;
+    m_startMeanB = 0.0;
+    m_startMeanH = 0.0;
+    m_startVarB = 0.0;
+    m_startVarH = 0.0;
+    m_periodicBb = -1.0;
+    m_periodicHud = -1.0;
+    g_hudlessHealth.store(0);
+    m_invRb[0].Reset();
+    m_invRb[1].Reset();
 }
 } // namespace mfg
