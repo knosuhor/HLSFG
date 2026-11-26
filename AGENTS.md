@@ -8,46 +8,62 @@ before changing code. Keep this file current when a stage changes.
 HLSFG must stay **game-agnostic**. The target is compatibility parity with
 other OptiScaler nvngx replacements: everywhere FSR3 / ANR work under
 OptiScaler, HLSFG should work too. Measuring in one game is fine; tuning
-constants, thresholds or heuristics for one game is not. Every per-game
-observation should be generalized into either (a) contract handling,
-(b) a host-behavior detector with a principled measurement, or (c) a
-documented, opt-in experiment.
+constants, thresholds or heuristics for one game is not. Per the 5.2
+tagging contract, never conclude that a game's Streamline data is
+incomplete or garbage: if other providers work there and the game
+supports DLSS-G, the integration is possible and the fix belongs on our
+side. Every per-game observation should be generalized into either
+(a) contract handling, (b) principled input handling (e.g. the polarity
+probe), or (c) a documented, opt-in experiment.
 
 ## Current stage (Nov 2026)
 
-Phase 1 is live end-to-end: the LSFG backend (LS 3.2.1 shader bank +
-lsfg-vk graph semantics, D3D12-native) generates real intermediate frames
-in Cyberpunk 2077 and Control at 4K with the DLSS-G present contract.
+The LSFG backend (LS 3.2.1 shader bank + lsfg-vk graph semantics,
+D3D12-native) generates real intermediate frames in Cyberpunk 2077 and
+Control at 4K with the DLSS-G present contract. The backend selection
+(phase 0 passthrough / phase 0.5 blend) was removed on 2026-11-26:
+LSFG is the only backend, the old phase backends are deleted.
 
 Validated on real hosts:
 
-- Cyberpunk 2077: FG works. CORRECTED 2026-11-25 (preview-verified): the
-  hudless tag is HEALTHY in gameplay; the raw "HUDLess preview" combo
-  shows the game image 1:1 without HUD. The old "near-white dummy" is
-  a PHASE artifact: on pre-menu intro/logo screens the tagged hudless is a
-  flat near-white image (content gap ~0.9, variance 0). Evaluate/DLSSG runs
-  a few seconds on those screens, goes idle at the menu, and re-activates
-  near the end of level loading with a real hudless. The detector's
-  startup probes sample the intro phase and issue a sticky phase-blind
-  "garbage" verdict that discards a healthy hudless for the whole session
-  (known detector bug, top backlog item). This is contract-consistent
-  host behavior, see "Streamline DLSS-G contract reference" below: hosts
-  are supposed to null tags outside gameplay and often do not, leaving
-  flat/stale content tagged instead.
+- Cyberpunk 2077: FG works. CONFIRMED 2026-11-25/26 (preview-verified):
+  the hudless tag is healthy in gameplay; the "HUDLess" preview mode
+  shows the game image 1:1 without HUD. Flat near-white tagged content
+  on pre-menu intro/logo screens is contract-consistent host behavior
+  (hosts are supposed to null tags outside gameplay and often keep
+  flat/stale content tagged instead, see the contract reference below).
+  Evaluate/DLSSG runs a few seconds on those screens, goes idle at the
+  menu, and re-activates near the end of level loading.
 - Control: R10G10B10A2 path runs (typed UAV stores). CONFIRMED 2026-11-26
-  (user-verified in-game): the hudless tag is HEALTHY in gameplay, same
-  pattern as Cyberpunk. Flat white/black tagged content appears only on
+  (user-verified in-game): the hudless tag is healthy in gameplay, same
+  pattern as Cyberpunk; flat white/black tagged content appears only on
   menus/cutscenes/intro-like screens. The earlier "hudless frozen frame"
-  diagnosis is RETRACTED, same phase artifact as in Cyberpunk. The
-  R10G10B10A2 ROI probe path is still unaudited (10-bit readback), so the
-  detector is likely silent there; do not read that silence as health.
-- NVIDIA Streamline sample: contract validation host for phase 0/0.5.
+  diagnosis is RETRACTED, same non-gameplay phase artifact.
+- NVIDIA Streamline sample: contract validation host.
 
 The visible behavior users care about: motion is interpolated (no judder
-from duplicated slots), no UI strobe from the hudless delta, HUD slightly
-warps during camera motion only while the hudless is dropped; in Cyberpunk
-that drop was the detector's intro false positive, not a broken tag. Once
-the detector is phase-aware, healthy-tag hosts should show a sharp HUD.
+from duplicated slots), no UI strobe from the hudless delta, sharp HUD
+via composite mode 0 whenever the host tags a hudless.
+
+### Input policy (2026-11-26 directive, do not regress)
+
+Never issue verdicts that a game's Streamline integration is incomplete
+or delivers garbage data. If other providers work under OptiScaler in a
+game that officially supports DLSS-G, our integration is possible; any
+observed anomaly is OUR contract handling to fix, not the host's data.
+Concretely:
+
+- The tagged HUDLessColor is trusted whenever present. The old garbage/
+  stale "sanity verdicts" (startup content + periodic freshness probes)
+  were REMOVED; there is no hudless drop path anymore.
+- Flat/stale hudless content during intro/menu/cutscene phases is
+  contract-consistent (guide 5.2: hosts should null tags outside
+  gameplay; many do not) and must never be treated as a data problem.
+- The ROI readback instrument remains only for the polarity autodetect
+  (direct vs complemented bytes), three startup samples, then retired.
+- The tab's Input preview dropdown (Off / HUDLess / UI Alpha / UI Color
+  and Alpha) writes the raw input to both outputs for live inspection;
+  absent inputs log once and fall through to the normal pipeline.
 
 ## Streamline DLSS-G contract reference
 
@@ -157,16 +173,16 @@ detection as our own responsibility if ever needed.
 ```
 src/ngx_exports.cpp   22 NVSDK exports + init/feature surface
 src/plugin.cpp        OptiScaler plugin tab, ini persistence [Plugin.HLSFG]
-src/backends.*        IFGBackend dispatch, Passthrough + Blend backends
-src/lsfg_backend.*    the real backend: ring buffer of source frames,
-                      LSFG graph dispatch, OutputReal contract, hudless
-                      sanity probes, UI composite modes
+src/backends.*        IFGBackend seam; the single LSFG instance lives here
+src/lsfg_backend.*    the backend: ring buffer of source frames,
+                      LSFG graph dispatch, OutputReal contract, polarity
+                      probe, input preview, UI composite modes
 src/lsfg/pipeline.cpp lsfg-vk v2.0.0-dev graph on ID3D12Device
 src/lsfg/shader_bank  extraction of the 202 RT_RCDATA resources from the
                       user's Lossless.dll (runtime, never vendored)
 src/ui_composite.*    one compute pass, two modes (see below)
 src/invert_copy.*     optional byte-polarity inversion for HUDLessColor
-src/mfg_state.*       settings + shared runtime state (g_hudlessHealth)
+src/mfg_state.*       settings (g_settings)
 ```
 
 ### Contract invariants (learned the hard way, do not regress)
@@ -189,37 +205,25 @@ src/mfg_state.*       settings + shared runtime state (g_hudlessHealth)
 
 ### HUD handling, three layers (in priority order)
 
-1. If a host provides `DLSSG.UI`/`UIAlpha` (none measured so far; probed
-   and logged once per session at call #5): consume for exact recomposition.
-   Not implemented yet.
-2. Healthy hudless: interpolate the hudless ring, composite mode 0:
+1. If a host provides `DLSSG.UI`/`UIAlpha` (none measured so far on
+   D3D12; OptiScaler forwards these keys only on its Vulkan path today;
+   probed and logged once per session at call #5): consume for exact
+   recomposition. Not implemented yet.
+2. Tagged hudless (trusted as delivered, see the input policy): interpolate
+   the hudless ring, composite mode 0:
    `out = interp + (backbuffer - hudless) * mask(threshold)`.
-3. Garbage hudless (detector verdict) or untagged game: interpolate the raw
-   backbuffer; composite mode 1 (temporal UI mask) is **opt-in and
-   experimental** (`TemporalUi`, default off) because a per-pixel threshold
-   without temporal state judders in low-contrast motion. Do not turn it on
-   by default without adding state/hysteresis (see backlog).
+3. Untagged game: interpolate the raw backbuffer; composite mode 1
+   (temporal UI mask) is **opt-in and experimental** (`TemporalUi`,
+   default off) because a per-pixel threshold without temporal state
+   judders in low-contrast motion. Do not turn it on by default without
+   adding state/hysteresis (see backlog).
 
-### Sanity detector (in lsfg_backend.cpp, rides the ROI readback probe)
+### Input preview (tab dropdown, diagnostic)
 
-- Startup, 3 samples: garbage when `|mean(bb)-mean(hud)| > 0.30` while the
-  hudless ROI is optically flat (`var(hud) < 0.25*var(bb)`, `var(bb) > 100`).
-  The flatness term protects hypothetical complemented-storage hosts, which
-  would carry scene structure.
-- Periodic, every ~300 calls: garbage when the backbuffer mean moved
-  (>0.01) while the hudless mean stayed still (<25% of that), or the content
-  verdict fires again; catches genuinely frozen-frame hosts (no known host
-  has shown one: both motivating observations, CP and Control, turned out
-  to be intro/menu-phase artifacts, see above).
-- Verdicts are sticky per session; once broken, HUDLess is nulled for the
-  whole session and the tab shows the health state (g_hudlessHealth).
-- KNOWN BUG (2026-11-25): the verdict is PHASE-BLIND. Startup probes run at
-  session start, which in Cyberpunk is the intro/logo screens where the tag
-  legitimately holds flat near-white content; the sticky verdict then
-  discards the healthy gameplay hudless for the rest of the session. Fix
-  (backlog #1): settle verdicts only under gameplay-like conditions (scene
-  motion confirmed) and re-open the verdict after a null-hudless stretch
-  when the tag returns.
+Off / HUDLess / UI Alpha / UI Color and Alpha. A selected input is copied
+raw to both FG outputs, bypassing the graph; missing inputs log once
+("preview: ... not provided") and the normal pipeline runs. This is how
+the healthy hudless in both test hosts was confirmed live.
 
 ## Build / deploy / test loop
 
@@ -233,7 +237,8 @@ Copy-Item .\build\Release\nvngx_dlssg.dll <game>\custom\HLSFG\dlssg\nvngx_dlssg.
   game's own DLSS option; OptiScaler FrameGen tab multiplier overrides the
   provider's MultiFrameCountMax.
 - Logs land next to the dll (`hlsfg.log`). Lines prefixed `lsfg: stage=`
-  order the per-evaluate pipeline; `hudless sanity:` is the detector.
+  order the per-evaluate pipeline; `lsfg: hudless polarity autodetect`
+  is the startup probe.
 - Frame dumps: `custom/HLSFG/dlssg/mfg-dump.txt` with content
   `<count> <dir>` enables ROI readback dumps for offline forensics
   (tools/dump_analyze). Remove the file for clean smoke tests.
@@ -253,23 +258,19 @@ Copy-Item .\build\Release\nvngx_dlssg.dll <game>\custom\HLSFG\dlssg\nvngx_dlssg.
 
 ## Backlog (priority order)
 
-1. **Phase-aware sanity detector**: do not settle sticky verdicts from probes
-   taken during non-gameplay phases (intro/logos, menus, load screens);
-   require confirmed scene motion before a verdict sticks, and re-open the
-   verdict after null-hudless stretches when the tag returns. This un-drops
-   the healthy Cyberpunk gameplay hudless and fixes the DisableHudless
-   no-op the user observed.
-2. **Temporal UI mask with state**: ping-pong mask texture + hysteresis
+1. **Temporal UI mask with state**: ping-pong mask texture + hysteresis
    (findings stay pinned until they really move), optionally gated by
-   global camera motion from the flow field. This is the path to sharp HUD
-   in garbage-hudless hosts without judder. Do not ship stateless again.
-3. **DLSSG.UI / UIAlpha consumer**: exact recomposition when a host
-   provides the UI layer; probe logging already in place.
-4. **Subrect support** (`*SubrectBaseX/Y/Width/Height`): copy regions
+   global camera motion from the flow field. This is the path to sharp
+   HUD in untagged hosts without judder. Do not ship stateless again.
+2. **DLSSG.UI / UIAlpha consumer**: exact recomposition when a host
+   provides the UI layer; probe logging already in place (D3D12 hosts
+   measured so far do not provide it; OptiScaler forwards the keys only
+   on its Vulkan path).
+3. **Subrect support** (`*SubrectBaseX/Y/Width/Height`): copy regions
    instead of whole frames where the host presents via subrects.
-5. **R10G10B10A2 + HDR** color path audit (PQ10 profiles) and the
+4. **R10G10B10A2 + HDR** color path audit (PQ10 profiles) and the
    BidirectionalDistortionField / NoWarp inputs.
-6. Vulkan surface (phase 2, MAKO FG later).
+5. Vulkan surface (later; MAKO FG behind the same seam).
 
 ## Housekeeping
 

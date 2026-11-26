@@ -2,7 +2,7 @@
 // GetProcAddress("NVSDK_NGX_" + name) for a custom dlssg provider:
 // proxies/Nvngx_Proxy.h, NgxFeatureModule::LoadExports().
 //
-// Phase 0 semantics: every call is logged, the contract is answered correctly
+// Every call is logged, the contract is answered correctly
 // (Success where a no-op is valid), but no frame is ever generated. Games run
 // at their base frame rate while we validate load, init, create and evaluate.
 
@@ -51,8 +51,8 @@ void InitLogging()
     initialised = true;
 
     mfg::log::InitFromAddress(reinterpret_cast<const void*>(&InitLogging));
-    MFG_LOG_INFO("HLSFG provider phase 0 loaded, backend=%s multiplier=%d",
-                 mfg::BackendName(mfg::g_settings.backend.load()), mfg::g_settings.multiplier.load());
+    MFG_LOG_INFO("HLSFG provider loaded (lsfg), multiplier=%d",
+                 mfg::g_settings.multiplier.load());
 }
 
 MfgFeature* FindFeature(const NVSDK_NGX_Handle* handle)
@@ -218,7 +218,7 @@ NVSDK_NGX_D3D12_PopulateParameters_Impl(NVSDK_NGX_Parameter* InParameters)
 }
 
 //
-// Vulkan (phase 0: correctly reported as unavailable; OptiScaler only treats
+// Vulkan (correctly reported as unavailable; OptiScaler only treats
 // VULKAN_Init != null as "vulkan available", and stubs are fine)
 //
 
@@ -227,7 +227,7 @@ namespace
 template <typename... Args>
 NVSDK_NGX_Result VkUnavailable(const char* name, Args...)
 {
-    MFG_LOG_INFO("%s: no Vulkan support in phase 0", name);
+    MFG_LOG_INFO("%s: no Vulkan support", name);
     return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
 }
 } // namespace

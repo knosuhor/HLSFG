@@ -1,8 +1,8 @@
-// Phase 1 backend: LSFG inference on the HUD-less frame pair.
+// LSFG backend: frame generation on the HUD-less frame pair.
 //
 // The LS 3.2.1 native blob (Lossless.dll, 202 RCDATA resources) yields
 // the DXBC compute family ids 255-279; the lsfg-vk v2.0.0-dev graph
-// provides theschedule semantics. The backend runs that graph directly
+// provides the schedule semantics. The backend runs that graph directly
 // on the caller's D3D12 device, no Vulkan interop (docs/PHASE1.md).
 #pragma once
 
@@ -20,7 +20,7 @@ namespace mfg
 class LsfgBackend final : public IFGBackend
 {
   public:
-    const char* Name() const override { return "LSFG (phase 1)"; }
+    const char* Name() const override { return "LSFG"; }
     NVSDK_NGX_Result InitD3D12(ID3D12Device* device) override;
     NVSDK_NGX_Result EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
                                    NVSDK_NGX_Parameter* params) override;
@@ -45,9 +45,9 @@ class LsfgBackend final : public IFGBackend
     UiComposite m_ui;             // hudless UI recomposition pass
     bool m_uiFailed = false;      // do not retry this session
 
-    // hudless polarity: some games tag HUDLessColor complemented
-    // (255 - color bytes, measured in Cyberpunk 2077). The ring copy
-    // negates such input so the graph and the UI delta see true colors.
+    // hudless polarity: a host may tag HUDLessColor complemented
+    // (255 - color bytes). The ring copy negates such input so the
+    // graph and the UI delta see true colors.
     InvertCopy m_invert;
     bool m_invertFailed = false;
     int m_invMode = -1;            // -1 unknown, else g_settings.hudlessInvert
@@ -64,21 +64,6 @@ class LsfgBackend final : public IFGBackend
     double m_invDirect = 0.0;
     double m_invInverted = 0.0;
 
-    // Garbage hudless detection (same ROI readback instrument): an
-    // input that does not track the backbuffer (static white dummy in
-    // Cyberpunk 2077, frozen frame in Control) is dropped for the rest
-    // of the session and the pipeline interpolates the raw backbuffer.
-    bool m_startupProbed = false;  // 3 startup samples drained + verdict
-    bool m_hudlessBroken = false;  // session verdict: never use hudless
-    uint64_t m_lastProbeCall = 0;  // periodic probe spacing bookkeeping
-    uint32_t m_probeCount = 0;     // periodic samples for log cadence
-    double m_startMeanB = 0.0;     // startup accumulators (3 samples)
-    double m_startMeanH = 0.0;
-    double m_startVarB = 0.0;
-    double m_startVarH = 0.0;
-    double m_periodicBb = -1.0;    // previous periodic sample means
-    double m_periodicHud = -1.0;   // (-1 = no sample yet)
-
     bool InvProbe(ID3D12GraphicsCommandList* cmd, ID3D12Resource* bb,
         ID3D12Resource* hudless);
     void InvDrain();
@@ -89,6 +74,8 @@ class LsfgBackend final : public IFGBackend
         uint32_t mode);
 
     bool m_temporalLogged = false;  // first temporal composite logged
-    bool m_previewLogged = false;   // HUDLess preview active logged
+    bool m_previewLogged = false;   // input preview active logged
+    int m_previewAbsentLogged = 0;  // bit 1: hudless absent log once,
+                                   // bit 2: uiAlpha, bit 4: ui
 };
 } // namespace mfg

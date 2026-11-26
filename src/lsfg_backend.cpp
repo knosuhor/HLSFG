@@ -8,7 +8,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
 #include <filesystem>
 
 namespace mfg
@@ -45,18 +44,6 @@ std::filesystem::path GameRootFromModule()
 
 // hudless availability tracking across burst evaluates (logging only)
 uint64_t g_nullStreak = 0;
-
-// Garbage hudless detection thresholds. A tagged HUDLessColor that does
-// not track the backbuffer must not feed the interpolator: Cyberpunk
-// 2077 tags a static near-white dummy while the scene is dark, Control
-// tags a frozen frame. All numbers are measured on the 256x128 ROI
-// probe (byte-decodable formats only), byte scale 0..255.
-constexpr double kContentBreak = 0.30;  // |mean(bb)-mean(hud)| gap
-constexpr double kSceneVarMin  = 100.0; // bb variance so the scene has structure
-constexpr double kHudVarRatio  = 0.25;  // hudless variance vs bb (flat dummy)
-constexpr uint64_t kProbeSpacing = 300; // calls between freshness probes
-constexpr double kBbMotion = 0.01;      // bb mean change across a probe pair
-constexpr double kStaleRatio = 0.25;    // hudless change vs bb change
 
 bool UavStoreSupported(ID3D12Device* device, DXGI_FORMAT fmt)
 {
@@ -448,7 +435,7 @@ NVSDK_NGX_Result LsfgBackend::InitD3D12(ID3D12Device* device)
     if (m_bankReady)
         return NVSDK_NGX_Result_Success;
 
-    MFG_LOG_INFO("LsfgBackend init (phase 1), device=%p",
+    MFG_LOG_INFO("LsfgBackend init, device=%p",
         static_cast<void*>(device));
     m_device = device;
 
@@ -662,21 +649,13 @@ bool LsfgBackend::InvProbe(ID3D12GraphicsCommandList* cmd,
     return true;
 }
 
-// Content verdict on one drained sample pair: a garbage hudless reads
-// as a huge mean-luma gap from the backbuffer while being optically
-// flat (variance far below the scene's own structure).
-static bool HudlessContentGarbage(double meanB, double meanH,
-    double varB, double varH)
-{
-    const double content = std::fabs(meanB - meanH) / 255.0;
-    return content > kContentBreak && varB > kSceneVarMin &&
-        varH < kHudVarRatio * varB;
-}
-
 // Map a queued probe once the copies have certainly finished. The
-// sample feeds three estimates: the polarity vote (direct vs
-// complemented bytes), the startup content verdict (3 samples) and
-// the periodic freshness verdict (probe pairs spaced ~300 calls).
+// sample feeds one estimate: the polarity vote (direct vs complemented
+// bytes) over three startup samples. Per the Streamline DLSS-G contract
+// (ProgrammingGuideDLSS_G.md 5.2) the tagged hudless is trusted as
+// delivered: flat or stale-looking content on intro/menu/cutscene
+// screens is the host keeping a tag alive outside gameplay, not a data
+// problem to rule on, so no quality verdicts are issued here.
 void LsfgBackend::InvDrain()
 {
     if (!m_invRbQueued || m_invRb[0] == nullptr || m_invRb[1] == nullptr)
@@ -698,7 +677,6 @@ void LsfgBackend::InvDrain()
     }
     const size_t rowBytes = (size_t) m_invRoiW * 4;
     double direct = 0.0, inverted = 0.0;
-    double sumB = 0.0, sumH = 0.0, sumB2 = 0.0, sumH2 = 0.0;
     uint64_t count = 0;
     for (uint32_t y = 0; y < m_invRoiH; ++y)
     {
@@ -711,10 +689,6 @@ void LsfgBackend::InvDrain()
             direct += (b > h) ? (b - h) : (h - b);
             inverted += (b > 255 - h) ? (b - (255 - h))
                                       : ((255 - h) - b);
-            sumB += b;
-            sumH += h;
-            sumB2 += b * b;
-            sumH2 += h * h;
         }
         count += rowBytes;
     }
@@ -723,97 +697,23 @@ void LsfgBackend::InvDrain()
     m_invRbQueued = false;
 
     const double n = (double) count;
-    const double meanB = sumB / n;
-    const double meanH = sumH / n;
-    const double varB = sumB2 / n - meanB * meanB;
-    const double varH = sumH2 / n - meanH * meanH;
 
-    if (!m_startupProbed)
-    {
-        // startup: three samples, then the content verdict
-        m_startMeanB += meanB;
-        m_startMeanH += meanH;
-        m_startVarB += varB;
-        m_startVarH += varH;
-        m_invDirect += direct / n / 255.0;
-        m_invInverted += inverted / n / 255.0;
-        ++m_invSamples;
-        if (m_invSamples < 3)
-            return;
-        m_startupProbed = true;
-        const double sB = m_startMeanB / 3.0;
-        const double sH = m_startMeanH / 3.0;
-        const double vB = m_startVarB / 3.0;
-        const double vH = m_startVarH / 3.0;
-        const double content = std::fabs(sB - sH) / 255.0;
-        if (HudlessContentGarbage(sB, sH, vB, vH))
-        {
-            m_hudlessBroken = true;
-            g_hudlessHealth.store(2);
-            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
-                "varH=%.0f -> garbage, interpolating the backbuffer "
-                "(rest of session)", content, vB, vH);
-            m_invRb[0].Reset();
-            m_invRb[1].Reset();
-            return;
-        }
-        g_hudlessHealth.store(1);
-        if (content > kContentBreak && vB <= kSceneVarMin)
-            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f but scene "
-                "flat (varB=%.0f) -> inconclusive, periodic probes "
-                "continue", content, vB);
-        else
-            MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
-                "varH=%.0f -> healthy", content, vB, vH);
-        if (!m_invResolved)
-        {
-            const double d = m_invDirect / m_invSamples;
-            const double v = m_invInverted / m_invSamples;
-            m_invActive = (v * 1.25 < d);
-            m_invResolved = true;
-            MFG_LOG_INFO("lsfg: hudless polarity autodetect: "
-                "L1 direct=%.4f inverted=%.4f (%u samples) -> invert %s",
-                d, v, m_invSamples, m_invActive ? "ON" : "OFF");
-        }
+    // three samples, then the polarity vote settles for the session
+    m_invDirect += direct / n / 255.0;
+    m_invInverted += inverted / n / 255.0;
+    ++m_invSamples;
+    if (m_invSamples < 3)
         return;
-    }
-
-    // periodic freshness pair: compare against the previous sample
-    ++m_probeCount;
-    if (HudlessContentGarbage(meanB, meanH, varB, varH))
-    {
-        m_hudlessBroken = true;
-        g_hudlessHealth.store(2);
-        MFG_LOG_INFO("lsfg: hudless sanity: content=%.2f varB=%.0f "
-            "varH=%.0f -> garbage (probe %u), interpolating the "
-            "backbuffer (rest of session)",
-            std::fabs(meanB - meanH) / 255.0, varB, varH, m_probeCount);
-        m_invRb[0].Reset();
-        m_invRb[1].Reset();
-        return;
-    }
-    if (m_periodicBb >= 0.0)
-    {
-        const double moved = std::fabs(meanB - m_periodicBb) / 255.0;
-        const double hudMoved = std::fabs(meanH - m_periodicHud) / 255.0;
-        if (moved > kBbMotion && hudMoved < kStaleRatio * moved)
-        {
-            m_hudlessBroken = true;
-            g_hudlessHealth.store(2);
-            MFG_LOG_INFO("lsfg: hudless sanity: backbuffer moved %.3f "
-                "while hudless moved %.4f (probe %u) -> stale, "
-                "interpolating the backbuffer (rest of session)",
-                moved, hudMoved, m_probeCount);
-            m_invRb[0].Reset();
-            m_invRb[1].Reset();
-            return;
-        }
-        if ((m_probeCount % 10) == 1)
-            MFG_LOG_INFO("lsfg: hudless sanity ok (probe %u: bb moved "
-                "%.3f, hud moved %.4f)", m_probeCount, moved, hudMoved);
-    }
-    m_periodicBb = meanB;
-    m_periodicHud = meanH;
+    m_invResolved = true;
+    const double d = m_invDirect / m_invSamples;
+    const double v = m_invInverted / m_invSamples;
+    m_invActive = (v * 1.25 < d);
+    MFG_LOG_INFO("lsfg: hudless polarity autodetect: "
+        "L1 direct=%.4f inverted=%.4f (%u samples) -> invert %s",
+        d, v, m_invSamples, m_invActive ? "ON" : "OFF");
+    // the readback instrument is not needed for the rest of the session
+    m_invRb[0].Reset();
+    m_invRb[1].Reset();
 }
 NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         NVSDK_NGX_Parameter* params)
@@ -828,46 +728,61 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     ID3D12Resource* outputInterpolated =
         GetResource(params, "DLSSG.OutputInterpolated");
 
-    // Garbage hudless verdict (sanity probes): once broken, drop the
-    // tagged input everywhere and let the pipeline interpolate the raw
-    // backbuffer, exactly like an untagged game. The tagged pointer is
-    // kept for probe scheduling and tag-presence logging.
-    ID3D12Resource* const taggedHudless = hudless;
-    if (m_hudlessBroken)
-        hudless = nullptr;
-
-    // HUDLess preview (tab dropdown): bypass the graph entirely and
-    // write the raw tagged HUDLessColor to both outputs, so what is on
-    // screen IS the hudless the game delivers. Uses the tagged pointer
-    // (works before and after a garbage verdict); frames without a
-    // tagged hudless fall through to the normal pipeline.
-    if (g_settings.hudlessPreview.load() && taggedHudless != nullptr &&
-        cmdList != nullptr)
+    // Input preview (tab dropdown): bypass the graph entirely and write
+    // the selected raw input to both outputs, so what is on screen IS
+    // the input the host delivers. Frames without that input fall
+    // through to the normal pipeline.
+    const int preview = g_settings.inputPreview.load();
+    if (preview != 0 && cmdList != nullptr)
     {
-        bool previewed = false;
-        if (outputReal != nullptr && SameFamily(
-                outputReal->GetDesc().Format, taggedHudless->GetDesc().Format))
+        static const char* const kPreviewSources[] = {
+            "", "DLSSG.HUDLess", "DLSSG.UIAlpha", "DLSSG.UI",
+        };
+        static const char* const kPreviewNames[] = {
+            "", "HUDLessColor", "UIAlpha", "UI Color and Alpha",
+        };
+        ID3D12Resource* previewRes =
+            GetResource(params, kPreviewSources[preview]);
+        const int absentBit = 1 << (preview - 1);
+        if (previewRes == nullptr)
         {
-            CopyFrame(cmdList, outputReal, taggedHudless,
-                D3D12_RESOURCE_STATE_COPY_DEST);
-            previewed = true;
+            if ((m_previewAbsentLogged & absentBit) == 0)
+            {
+                m_previewAbsentLogged |= absentBit;
+                MFG_LOG_INFO("lsfg: preview: %s (%s) not provided, "
+                    "normal pipeline", kPreviewNames[preview],
+                    kPreviewSources[preview]);
+            }
         }
-        if (outputInterpolated != nullptr && SameFamily(
-                outputInterpolated->GetDesc().Format,
-                taggedHudless->GetDesc().Format))
+        else
         {
-            CopyFrame(cmdList, outputInterpolated, taggedHudless,
-                D3D12_RESOURCE_STATE_COPY_DEST);
-            previewed = true;
-        }
-        if (previewed)
-        {
-            if (m_calls <= 3 ||
-                (m_previewLogged && (m_calls % 500) == 0))
-                MFG_LOG_INFO("lsfg: preview: raw HUDLessColor on outputs "
-                    "(call#%llu)", m_calls);
-            m_previewLogged = true;
-            return NVSDK_NGX_Result_Success;
+            bool previewed = false;
+            if (outputReal != nullptr && SameFamily(
+                    outputReal->GetDesc().Format, previewRes->GetDesc().Format))
+            {
+                CopyFrame(cmdList, outputReal, previewRes,
+                    preview == 1 ? D3D12_RESOURCE_STATE_COPY_DEST
+                                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                previewed = true;
+            }
+            if (outputInterpolated != nullptr && SameFamily(
+                    outputInterpolated->GetDesc().Format,
+                    previewRes->GetDesc().Format))
+            {
+                CopyFrame(cmdList, outputInterpolated, previewRes,
+                    preview == 1 ? D3D12_RESOURCE_STATE_COPY_DEST
+                                : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                previewed = true;
+            }
+            if (previewed)
+            {
+                if (m_calls <= 3 ||
+                    (m_previewLogged && (m_calls % 500) == 0))
+                    MFG_LOG_INFO("lsfg: preview: raw %s on outputs "
+                        "(call#%llu)", kPreviewNames[preview], m_calls);
+                m_previewLogged = true;
+                return NVSDK_NGX_Result_Success;
+            }
         }
     }
 
@@ -946,7 +861,7 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     // so dump sessions can be correlated with the exact mode.
     if (burst)
     {
-        if (taggedHudless == nullptr)
+        if (hudless == nullptr)
         {
             if (g_nullStreak == 0)
                 MFG_LOG_INFO("lsfg: hudless=null stretch begins "
@@ -1031,12 +946,10 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         return NVSDK_NGX_Result_Success;
     }
 
-    // hudless polarity (some games tag HUDLessColor complemented,
+    // hudless polarity (a host may tag HUDLessColor complemented,
     // 255 - color bytes; auto mode resolves after the startup probe
-    // samples, forced modes right here) and hudless garbage detection:
-    // a tagged input that does not track the backbuffer (static white
-    // dummy measured in Cyberpunk 2077, frozen frame in Control) is
-    // dropped for the rest of the session by the probe drain.
+    // samples, forced modes right here). The tagged hudless itself is
+    // trusted as delivered (Streamline contract): no quality verdicts.
     if (!m_invResolved)
     {
         if (m_invMode < 0)
@@ -1048,16 +961,12 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
             MFG_LOG_INFO("lsfg: hudless invert %s (forced)",
                 m_invActive ? "ON" : "OFF");
         }
-    }
-    // probe scheduling: three startup samples, then freshness pairs
-    // spaced kProbeSpacing calls apart (readback drained 3 calls later)
-    if (taggedHudless != nullptr && backbuffer != nullptr &&
-        !m_hudlessBroken &&
-        (!m_startupProbed ||
-         m_calls - m_lastProbeCall >= kProbeSpacing))
-    {
-        if (InvProbe(cmdList, backbuffer, taggedHudless))
-            m_lastProbeCall = m_calls;
+        else if (hudless != nullptr && backbuffer != nullptr)
+        {
+            // probe scheduling: three startup samples for the polarity
+            // vote, then the instrument retires for the session
+            InvProbe(cmdList, backbuffer, hudless);
+        }
     }
 
     // ring: store the incoming frame into slot (fidx & 1)
@@ -1167,7 +1076,7 @@ void LsfgBackend::Shutdown()
     m_pipelineReady = false;
     m_device = nullptr;
     // hudless polarity is probed fresh per session (games and render
-    // paths can differ between them); the garbage verdict is too
+    // paths can differ between them)
     m_invMode = -1;
     m_invResolved = false;
     m_invActive = false;
@@ -1180,19 +1089,9 @@ void LsfgBackend::Shutdown()
     m_invRoiH = 0;
     m_invPitch = 0;
     m_invSize = 0;
-    m_startupProbed = false;
-    m_hudlessBroken = false;
-    m_lastProbeCall = 0;
-    m_probeCount = 0;
     m_temporalLogged = false;
     m_previewLogged = false;
-    m_startMeanB = 0.0;
-    m_startMeanH = 0.0;
-    m_startVarB = 0.0;
-    m_startVarH = 0.0;
-    m_periodicBb = -1.0;
-    m_periodicHud = -1.0;
-    g_hudlessHealth.store(0);
+    m_previewAbsentLogged = 0;
     m_invRb[0].Reset();
     m_invRb[1].Reset();
 }

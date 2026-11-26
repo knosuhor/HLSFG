@@ -9,9 +9,9 @@ to FG providers, with game-agnostic HUD handling layered on top.
 The project goal is explicitly **not** single-game tuning: HLSFG should
 work wherever other OptiScaler nvngx replacements (FSR3, ANR) work.
 
-Status: **Phase 1** - end-to-end multi-frame generation validated in real
-Streamline 2 titles (Cyberpunk 2077, Control). See `docs/CONTRACT.md` for the
-measured contract and `docs/PHASES.md` for the phase plan.
+Status: end-to-end multi-frame generation validated in real Streamline 2
+titles (Cyberpunk 2077, Control). See `docs/CONTRACT.md` for the measured
+contract.
 
 ## What it does
 
@@ -22,29 +22,31 @@ measured contract and `docs/PHASES.md` for the phase plan.
   interpolated slot for the `[OutputInterpolated, OutputReal]` present pair;
   `OutputReal` is always refreshed with the current real frame (intermediate
   frames never shift real slots back in time).
-- **Blend / Passthrough backends** for contract validation and log runs.
 - TYPELESS-safe pipeline: games that tag inputs `R8G8B8A8_TYPELESS` (or the
   B8G8R8A8 / R10G10B10A2 families) run the same graph via concrete-view
   casting; no silent fallbacks on format aliases.
-- **Garbage-hudless detection**: HUD-less tags that do not track the
-  backbuffer (a static white dummy in Cyberpunk 2077, a frozen frame in
-  Control) are detected at runtime from small ROI readback probes
-  (content gap + optical flatness, then frame-to-frame freshness) and
-  dropped for the rest of the session; the interpolator then runs on the
-  raw backbuffer, exactly like an untagged game.
+- **Trusted inputs**: the tagged HUD-less capture is used exactly as the
+  host delivers it (per the Streamline tagging contract, hosts may keep
+  flat/stale tags alive during intro/menu/cutscene phases; that is the
+  host's prerogative, not data to rule on). A small ROI probe resolves
+  the rare complemented-byte storage polarity at startup; no quality
+  verdicts are issued.
 - **HUD recomposition, two modes**:
-  - *hudless delta* (default): with a healthy HUD-less capture the UI layer
+  - *hudless delta* (default): with a tagged HUD-less capture the UI layer
     is `(backbuffer - hudless)`, detected per frame with a threshold and
     layered onto generated frames.
-  - *temporal mask* (experimental, off by default): when no usable hudless
-    exists, pixels that did not change between consecutive real frames are
+  - *temporal mask* (experimental, off by default): when no hudless is
+    tagged, pixels that did not change between consecutive real frames are
     pinned to the current real frame instead of being interpolated. Being a
     per-pixel threshold without temporal state it can judder in low-contrast
     motion; it is opt-in (`TemporalUi`).
-- **Plugin tab** in the OptiScaler menu: backend selector, flow scale
-  (pinned or tracking the FrameGen multiplier), UI recomposition toggle,
-  temporal mask toggle, HUDLess storage polarity, log toggle and a live
-  hudless-health indicator, persisted in `[Plugin.HLSFG]`.
+- **Input preview**: the tab can write a raw input (HUDLess, UI Alpha,
+  UI Color and Alpha) straight to both FG outputs for live inspection of
+  what the host delivers.
+- **Plugin tab** in the OptiScaler menu: flow scale (pinned or tracking
+  the FrameGen multiplier), UI recomposition toggle, temporal mask
+  toggle, HUDLess storage polarity, input preview, log toggle, persisted
+  in `[Plugin.HLSFG]`.
 
 ## Requirements
 
@@ -71,9 +73,9 @@ measured contract and `docs/PHASES.md` for the phase plan.
    FGOutput=dlssg
 
    [Plugin.HLSFG]
-   Backend=2         ; 0 passthrough, 1 blend, 2 lsfg
    Flow=             ; empty = track FrameGen multiplier, else pin 1..4
    UiComposite=true
+   InputPreview=0     ; 0 off, 1 hudless, 2 UIAlpha, 3 UI Color+Alpha
    ```
 4. Enable the game's native DLSS frame generation option.
 5. Log lands next to the dll as `hlsfg.log`.
@@ -94,23 +96,22 @@ workflow). The repository carries no NVIDIA or Lossless Scaling files.
 ```
 src/ngx_exports.cpp    NGX surface: 22 exports + OptiPluginInit
 src/plugin.cpp         settings tab, [Plugin.HLSFG] persistence
-src/backends.{h,cpp}   IFGBackend + Passthrough + Blend
-src/lsfg_backend.*     phase 1: LSFG graph on the caller's device, hudless
-                       sanity detector, present-contract output handling
+src/backends.{h,cpp}   IFGBackend seam (single LSFG instance)
+src/lsfg_backend.*     LSFG graph on the caller's device, polarity probe,
+                       input preview, present-contract output handling
 src/lsfg/              shader bank extraction + graph pipeline
 src/ui_composite.*     hudless-delta and temporal-mask UI modes
 src/invert_copy.*      HUDLessColor byte-polarity pass (auto/forced)
 docs/CONTRACT.md       measured OptiScaler contract, source references
-docs/PHASES.md         roadmap
+docs/PHASES.md         historical phase roadmap
 ```
 
 ## Known limitations (honest list)
 
-- No usable hudless means the HUD is interpolated with the world: it can
+- No tagged hudless means the HUD is interpolated with the world: it can
   warp/smear during camera motion (same class of artifact as any FG without
   a UI layer). OptiScaler's own `FGDisableHudless` converges to the same
-  state here: once the detector breaks a garbage hudless, the two paths are
-  identical.
+  state: nulling the tag gives the identical pipeline.
 - `DLSSG.UI` / `UIAlpha` / subrect parameters are logged when present but
   not yet consumed (no SL2 host measured so far provides them).
 - Subrects (`*SubrectBaseX/Y`, `*SubrectWidth/Height`) are not handled yet;
