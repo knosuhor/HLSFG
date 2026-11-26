@@ -274,7 +274,7 @@ the healthy hudless in both test hosts was confirmed live.
 ## Build / deploy / test loop
 
 ```powershell
-& 'C:\Program Files\CMake\bin\cmake.exe' --build 'C:\Users\knosu\mfgtest\mfg-provider\build' --config Release --target mfg-provider
+& 'C:\Program Files\CMake\bin\cmake.exe' --build 'C:\Users\knosu\OneDrive\Documents\mfg-provider\build' --config Release --target mfg-provider
 Copy-Item .\build\Release\nvngx_dlssg.dll <game>\custom\HLSFG\dlssg\nvngx_dlssg.dll -Force
 ```
 
