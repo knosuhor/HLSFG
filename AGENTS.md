@@ -13,8 +13,8 @@ tagging contract, never conclude that a game's Streamline data is
 incomplete or garbage: if other providers work there and the game
 supports DLSS-G, the integration is possible and the fix belongs on our
 side. Every per-game observation should be generalized into either
-(a) contract handling, (b) principled input handling (e.g. the polarity
-probe), or (c) a documented, opt-in experiment.
+(a) contract handling, (b) principled input handling, or (c) a
+documented, opt-in experiment.
 
 ## Current stage (Nov 2026)
 
@@ -59,8 +59,15 @@ Concretely:
 - Flat/stale hudless content during intro/menu/cutscene phases is
   contract-consistent (guide 5.2: hosts should null tags outside
   gameplay; many do not) and must never be treated as a data problem.
-- The ROI readback instrument remains only for the polarity autodetect
-  (direct vs complemented bytes), three startup samples, then retired.
+- The hudless byte-polarity (invert) feature was REMOVED on 2026-11-26
+  (evening). "Complemented storage" was a phantom: it came from the
+  same flawed ROI vote reading intro-phase content (flat white hudless
+  vs dark intro backbuffer), and the raw-preview verification proved the
+  tag is stored direct in both hosts. After the verdict removal the vote
+  misfired on its own (log 22:39: "L1 direct=0.89 inverted=0.11 ->
+  invert ON" during intro), which would have fed a negated hudless to
+  the graph for a whole session. The tagged input is now used byte-exact
+  as delivered; no readback probes remain.
 - The tab's Input preview dropdown (Off / HUDLess / UI Alpha / UI Color
   and Alpha) writes the raw input to both outputs for live inspection;
   absent inputs log once and fall through to the normal pipeline.
@@ -71,6 +78,32 @@ Distilled from NVIDIA Streamline `docs/ProgrammingGuideDLSS_G.md`
 (v2.14.16). This is the authoritative contract our nvngx provider is
 standing in for; consult it before inventing heuristics. Facts below are
 from the guide, with HLSFG implications noted.
+
+### Verified nvngx parameter names (2026-11-26)
+
+Extracted as strings from the host-side bridge `sl.dlss_g.dll` in the
+Cyberpunk install (NVIDIA's own Streamline-to-nvngx adapter), so these
+are the parameter names the REAL DLSS-G consumes, not guesses:
+
+- `DLSSG.HUDLess`, `DLSSG.Backbuffer`, `DLSSG.Depth`, `DLSSG.MVecs`,
+  `DLSSG.OutputReal`, `DLSSG.OutputInterpolated`,
+  `DLSSG.OutputDisableInterpolation` (all already handled).
+- UI: `DLSSG.UI` (UI Color and Alpha) and `DLSSG.UIAlpha` (UI Alpha).
+  There is NO "uiColorAlpha"-style key; UIColorAndAlpha is the SL
+  buffer TYPE (kBufferTypeUIColorAndAlpha), which the bridge maps to
+  `DLSSG.UI`. Related flags: `DLSSG.UserInterfaceRecompositionEnabled`,
+  `DLSSG.MenuDetectionEnabled`.
+- `DLSSG.NoWarp` (SL type kBufferTypeNoWarpMask) and
+  `DLSSG.BidirectionalDistortionField` (+ LowPrecision Scale/Bias).
+- Per-resource subrect keys exist for EVERY input:
+  `<Input>SubrectBaseX/BaseY/Width/Height` for Backbuffer, HUDLess,
+  UI, UIAlpha, Depth, MVecs, NoWarp, BidirectionalDistortionField.
+- Camera constants are passed as plain DLSSG.* params (CameraFwd/Right/
+  Up/Pos, ViewToClip matrices, FOV, Near/Far, JitterOffset...), i.e. the
+  ASCD inputs live on this surface too when the host provides them.
+- The bridge itself warns: "Neither kBufferTypeHUDLessColor,
+  kBufferTypeUIAlpha, nor kBufferTypeUIColorAndAlpha tag provided",
+  confirming the three UI-layer options.
 
 ### Required inputs and their semantics (guide 5.0/5.1)
 
@@ -175,13 +208,12 @@ src/ngx_exports.cpp   22 NVSDK exports + init/feature surface
 src/plugin.cpp        OptiScaler plugin tab, ini persistence [Plugin.HLSFG]
 src/backends.*        IFGBackend seam; the single LSFG instance lives here
 src/lsfg_backend.*    the backend: ring buffer of source frames,
-                      LSFG graph dispatch, OutputReal contract, polarity
-                      probe, input preview, UI composite modes
+                      LSFG graph dispatch, OutputReal contract,
+                      input preview, UI composite modes
 src/lsfg/pipeline.cpp lsfg-vk v2.0.0-dev graph on ID3D12Device
 src/lsfg/shader_bank  extraction of the 202 RT_RCDATA resources from the
                       user's Lossless.dll (runtime, never vendored)
 src/ui_composite.*    one compute pass, two modes (see below)
-src/invert_copy.*     optional byte-polarity inversion for HUDLessColor
 src/mfg_state.*       settings (g_settings)
 ```
 
@@ -237,8 +269,7 @@ Copy-Item .\build\Release\nvngx_dlssg.dll <game>\custom\HLSFG\dlssg\nvngx_dlssg.
   game's own DLSS option; OptiScaler FrameGen tab multiplier overrides the
   provider's MultiFrameCountMax.
 - Logs land next to the dll (`hlsfg.log`). Lines prefixed `lsfg: stage=`
-  order the per-evaluate pipeline; `lsfg: hudless polarity autodetect`
-  is the startup probe.
+  order the per-evaluate pipeline.
 - Frame dumps: `custom/HLSFG/dlssg/mfg-dump.txt` with content
   `<count> <dir>` enables ROI readback dumps for offline forensics
   (tools/dump_analyze). Remove the file for clean smoke tests.

@@ -8,7 +8,6 @@
 
 #include "backends.h"
 
-#include "invert_copy.h"
 #include "ui_composite.h"
 #include "lsfg/pipeline.h"
 #include "lsfg/shader_bank.h"
@@ -44,29 +43,6 @@ class LsfgBackend final : public IFGBackend
     uint64_t m_fallbacks = 0;
     UiComposite m_ui;             // hudless UI recomposition pass
     bool m_uiFailed = false;      // do not retry this session
-
-    // hudless polarity: a host may tag HUDLessColor complemented
-    // (255 - color bytes). The ring copy negates such input so the
-    // graph and the UI delta see true colors.
-    InvertCopy m_invert;
-    bool m_invertFailed = false;
-    int m_invMode = -1;            // -1 unknown, else g_settings.hudlessInvert
-    bool m_invResolved = false;    // polarity decided for this session
-    bool m_invActive = false;      // negate the hudless input
-    // auto-detect probe: small ROI copies of bb + hudless into readback,
-    // drained a few evaluates later once the copy has certainly finished
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_invRb[2];
-    bool m_invRbQueued = false;
-    uint64_t m_invQueuedCall = 0;
-    uint32_t m_invRoiW = 0, m_invRoiH = 0;
-    size_t m_invPitch = 0, m_invSize = 0;
-    uint32_t m_invSamples = 0;
-    double m_invDirect = 0.0;
-    double m_invInverted = 0.0;
-
-    bool InvProbe(ID3D12GraphicsCommandList* cmd, ID3D12Resource* bb,
-        ID3D12Resource* hudless);
-    void InvDrain();
 
     void CompositeUi(ID3D12GraphicsCommandList* cmdList,
         ID3D12Resource* ringSlot, ID3D12Resource* backbuffer,

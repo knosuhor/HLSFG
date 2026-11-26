@@ -24,10 +24,6 @@ struct Settings
     // actually delivers; live, ini InputPreview).
     std::atomic<int> inputPreview{ 0 };
     std::atomic<int> uiCutoff{ 2 };         // UI delta threshold, percent (0..10)
-    // HUDLessColor byte polarity: 0 = auto-detect (readback probe),
-    // 1 = complemented storage (255 - color), 2 = direct storage.
-    // Applies after a game restart.
-    std::atomic<int> hudlessInvert{ 0 };
 };
 
 extern Settings g_settings;

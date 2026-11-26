@@ -28,9 +28,8 @@ contract.
 - **Trusted inputs**: the tagged HUD-less capture is used exactly as the
   host delivers it (per the Streamline tagging contract, hosts may keep
   flat/stale tags alive during intro/menu/cutscene phases; that is the
-  host's prerogative, not data to rule on). A small ROI probe resolves
-  the rare complemented-byte storage polarity at startup; no quality
-  verdicts are issued.
+  host's prerogative, not data to rule on). No quality verdicts, no
+  readback probes, no byte re-interpretation.
 - **HUD recomposition, two modes**:
   - *hudless delta* (default): with a tagged HUD-less capture the UI layer
     is `(backbuffer - hudless)`, detected per frame with a threshold and
@@ -45,8 +44,7 @@ contract.
   what the host delivers.
 - **Plugin tab** in the OptiScaler menu: flow scale (pinned or tracking
   the FrameGen multiplier), UI recomposition toggle, temporal mask
-  toggle, HUDLess storage polarity, input preview, log toggle, persisted
-  in `[Plugin.HLSFG]`.
+  toggle, input preview, log toggle, persisted in `[Plugin.HLSFG]`.
 
 ## Requirements
 
@@ -97,11 +95,10 @@ workflow). The repository carries no NVIDIA or Lossless Scaling files.
 src/ngx_exports.cpp    NGX surface: 22 exports + OptiPluginInit
 src/plugin.cpp         settings tab, [Plugin.HLSFG] persistence
 src/backends.{h,cpp}   IFGBackend seam (single LSFG instance)
-src/lsfg_backend.*     LSFG graph on the caller's device, polarity probe,
-                       input preview, present-contract output handling
+src/lsfg_backend.*     LSFG graph on the caller's device, input
+                       preview, present-contract output handling
 src/lsfg/              shader bank extraction + graph pipeline
 src/ui_composite.*     hudless-delta and temporal-mask UI modes
-src/invert_copy.*      HUDLessColor byte-polarity pass (auto/forced)
 docs/CONTRACT.md       measured OptiScaler contract, source references
 docs/PHASES.md         historical phase roadmap
 ```

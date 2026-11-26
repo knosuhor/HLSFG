@@ -10,7 +10,6 @@ add_library(mfg-provider SHARED
     src/plugin.cpp
     src/backends.cpp
     src/lsfg_backend.cpp
-    src/invert_copy.cpp
     src/ui_composite.cpp
     src/lsfg/shader_bank.cpp
     src/lsfg/pipeline.cpp

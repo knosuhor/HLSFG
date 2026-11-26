@@ -49,15 +49,7 @@ void Draw(void* /*userData*/)
                      "motion; uncheck for pure interpolation (HUD slightly warped "
                      "during camera motion).");
 
-    api->Section("Hudless input");
-    const char* invModes[] = { "Auto-detect", "Inverted (255 - x)", "Direct" };
-    bool invDisabled[] = { false, false, false };
-    int hudlessInvert = mfg::g_settings.hudlessInvert.load();
-    if (api->Combo("HUDLess storage##mfg", &hudlessInvert, invModes, 3, invDisabled))
-        mfg::g_settings.hudlessInvert.store(hudlessInvert);
-    api->ItemTooltip("Auto-detect probes the first frames and negates such input before frame "
-                     "generation, so the interpolator sees true colors. Applies after a game restart.");
-
+    api->Section("Input inspection");
     const char* previewModes[] = { "Off", "HUDLess", "UI Alpha", "UI Color and Alpha" };
     bool previewDisabled[] = { false, false, false, false };
     int previewSel = mfg::g_settings.inputPreview.load();
@@ -86,7 +78,6 @@ void Draw(void* /*userData*/)
         api->SetBool(plugin, "UiComposite", mfg::g_settings.uiComposite.load());
         api->SetBool(plugin, "TemporalUi", mfg::g_settings.temporalUi.load());
         api->SetInt(plugin, "InputPreview", mfg::g_settings.inputPreview.load());
-        api->SetInt(plugin, "HudlessInvert", mfg::g_settings.hudlessInvert.load());
         // UiCutoff stays internal (tunable via the ini key only, default 2).
         api->SaveSettings(plugin);
         if (OPTI_API_HAS(api, Log))
@@ -122,7 +113,6 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const OptiPluginApi* api, O
     mfg::g_settings.temporalUi.store(api->GetBool(plugin, "TemporalUi", false));
     mfg::g_settings.inputPreview.store(api->GetInt(plugin, "InputPreview", 0));
     mfg::g_settings.uiCutoff.store(api->GetInt(plugin, "UiCutoff", 2));
-    mfg::g_settings.hudlessInvert.store(api->GetInt(plugin, "HudlessInvert", 0));
 
     api->RegisterTab(plugin, "HLSFG", "HUD-less FG: LSFG shaders below the GUI, UI recomposed from the hudless delta", Draw,
                      nullptr);
