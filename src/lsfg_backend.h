@@ -47,11 +47,13 @@ class LsfgBackend final : public IFGBackend
     void CompositeUi(ID3D12GraphicsCommandList* cmdList,
         ID3D12Resource* ringSlot, ID3D12Resource* backbuffer,
         ID3D12Resource* interp, const D3D12_RESOURCE_DESC& interpDesc,
-        uint32_t mode);
+        uint32_t mode, ID3D12Resource* uiTex);
 
     bool m_temporalLogged = false;  // first temporal composite logged
     bool m_previewLogged = false;   // input preview active logged
     int m_previewAbsentLogged = 0;  // bit 1: hudless absent log once,
                                    // bit 2: uiAlpha, bit 4: ui
+    bool m_uiTagLogged = false;     // UI-tag composite first used
+    bool m_uiMismatchLogged = false; // UI tag extent mismatch logged
 };
 } // namespace mfg

@@ -516,10 +516,13 @@ bool LsfgBackend::EnsurePipeline(uint32_t width, uint32_t height,
 void LsfgBackend::CompositeUi(ID3D12GraphicsCommandList* cmdList,
     ID3D12Resource* ringSlot, ID3D12Resource* backbuffer,
     ID3D12Resource* interp, const D3D12_RESOURCE_DESC& interpDesc,
-    uint32_t mode)
+    uint32_t mode, ID3D12Resource* uiTex)
 {
     if (!g_settings.uiComposite.load() || ringSlot == nullptr ||
         backbuffer == nullptr || interp == nullptr)
+        return;
+    // modes 2/3/4 consume a UI tag; without it there is nothing to do
+    if (mode >= 2 && uiTex == nullptr)
         return;
     if (!m_ui.Ready() && !m_uiFailed)
     {
@@ -537,17 +540,24 @@ void LsfgBackend::CompositeUi(ID3D12GraphicsCommandList* cmdList,
         return;
     const float cutoff =
         static_cast<float>(g_settings.uiCutoff.load()) / 100.0f;
-    m_ui.Dispatch(cmdList, ringSlot, backbuffer, interp,
+    m_ui.Dispatch(cmdList, ringSlot, backbuffer, interp, uiTex,
         static_cast<uint32_t>(interpDesc.Width),
         static_cast<uint32_t>(interpDesc.Height), cutoff, mode);
-    if (mode != 0 && !m_temporalLogged)
+    if (mode == 1 && !m_temporalLogged)
     {
         m_temporalLogged = true;
         MFG_LOG_INFO("lsfg: stage=ui-temporal (no usable hudless: UI "
             "masked from consecutive backbuffers)");
     }
     if (m_calls <= 3)
-        MFG_LOG_INFO("lsfg: stage=ui-composite");
+    {
+        if (mode == 0)
+            MFG_LOG_INFO("lsfg: stage=ui-composite");
+        else if (mode == 1)
+            MFG_LOG_INFO("lsfg: stage=ui-composite (temporal)");
+        else
+            MFG_LOG_INFO("lsfg: stage=ui-recompose mode=%u", mode);
+    }
 }
 
 NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
@@ -561,6 +571,13 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     ID3D12Resource* outputReal = GetResource(params, "DLSSG.OutputReal");
     ID3D12Resource* outputInterpolated =
         GetResource(params, "DLSSG.OutputInterpolated");
+
+    // SL DLSS-G tagging (ProgrammingGuideDLSS_G.md 5.1/5.2): games may
+    // tag a UI layer on top of the hudless color. kBufferTypeUIAlpha
+    // arrives as DLSSG.UIAlpha, kBufferTypeUIColorAndAlpha as DLSSG.UI;
+    // when both are tagged the guide prefers UIAlpha.
+    ID3D12Resource* uiAlpha = GetResource(params, "DLSSG.UIAlpha");
+    ID3D12Resource* uiColor = GetResource(params, "DLSSG.UI");
 
     // Input preview (tab dropdown): bypass the graph entirely and write
     // the selected raw input to both outputs, so what is on screen IS
@@ -799,6 +816,60 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
         cmdList->ResourceBarrier(2, post);
     }
 
+    // composite input selection per the guide: UI tags take priority
+    // (UIAlpha over UI Color+Alpha), then the hudless delta, then the
+    // opt-in temporal mask. A UI tag that does not match the
+    // interpolated extent is treated as absent, not judged.
+    uint32_t compMode = 0xFFFFFFFFu;
+    ID3D12Resource* uiTex = nullptr;
+    {
+        auto usable = [&](ID3D12Resource* r) -> ID3D12Resource* {
+            if (r == nullptr)
+                return nullptr;
+            const D3D12_RESOURCE_DESC d = r->GetDesc();
+            if (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                d.Width == interpDesc.Width &&
+                d.Height == interpDesc.Height)
+                return r;
+            if (!m_uiMismatchLogged)
+            {
+                m_uiMismatchLogged = true;
+                MFG_LOG_INFO("lsfg: ui tag extent %ux%u != interp %ux%u, "
+                    "treated as absent", (unsigned) d.Width,
+                    (unsigned) d.Height,
+                    (unsigned) interpDesc.Width,
+                    (unsigned) interpDesc.Height);
+            }
+            return nullptr;
+        };
+        ID3D12Resource* uiAlphaOk = usable(uiAlpha);
+        ID3D12Resource* uiColorOk = usable(uiColor);
+        if (uiAlphaOk != nullptr)
+        {
+            uiTex = uiAlphaOk;
+            compMode = hudless != nullptr ? 3 : 4;
+        }
+        else if (uiColorOk != nullptr)
+        {
+            uiTex = uiColorOk;
+            compMode = 2;
+        }
+        else if (hudless != nullptr)
+            compMode = 0;
+        else if (g_settings.temporalUi.load())
+            compMode = 1;
+        if (uiTex != nullptr && !m_uiTagLogged)
+        {
+            m_uiTagLogged = true;
+            MFG_LOG_INFO("lsfg: ui tag in use: %s fmt=%u %ux%u -> "
+                "composite mode %u",
+                compMode == 2 ? "DLSSG.UI" : "DLSSG.UIAlpha",
+                (unsigned) uiTex->GetDesc().Format,
+                (unsigned) uiTex->GetDesc().Width,
+                (unsigned) uiTex->GetDesc().Height, compMode);
+        }
+    }
+
     if (m_fidx == 0)
     {
         // first real frame: zero the transient images, blend the group
@@ -806,10 +877,11 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
             MFG_LOG_INFO("lsfg: stage=clears");
         m_pipeline.RecordClears(cmdList);
         fallback();
-        if (hudless != nullptr)
+        if (compMode != 0xFFFFFFFFu)
             CompositeUi(cmdList,
                 m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)),
-                backbuffer, outputInterpolated, interpDesc, 0);
+                backbuffer, outputInterpolated, interpDesc, compMode,
+                uiTex);
     }
     else
     {
@@ -835,17 +907,17 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             }
         }
-        if (hudless != nullptr)
+        // mode 1 (temporal) reads the previous backbuffer from the
+        // ring; every other mode reads the current slot (which holds
+        // the hudless frame when tagged)
+        if (compMode != 0xFFFFFFFFu)
             CompositeUi(cmdList,
-                m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)),
-                backbuffer, outputInterpolated, interpDesc, 0);
-        else if (g_settings.temporalUi.load())
-            // experimental, opt-in: temporal UI mask from the previous
-            // backbuffer held in the ring (no usable hudless); the
-            // per-pixel threshold can judder, so it is off by default
-            CompositeUi(cmdList,
-                m_pipeline.Source(static_cast<uint32_t>((m_fidx + 1) & 1)),
-                backbuffer, outputInterpolated, interpDesc, 1);
+                compMode == 1
+                    ? m_pipeline.Source(
+                        static_cast<uint32_t>((m_fidx + 1) & 1))
+                    : m_pipeline.Source(static_cast<uint32_t>(m_fidx & 1)),
+                backbuffer, outputInterpolated, interpDesc, compMode,
+                uiTex);
     }
 
     DumpCapture(m_device, cmdList, m_fidx, outputReal, outputInterpolated,
@@ -869,5 +941,7 @@ void LsfgBackend::Shutdown()
     m_temporalLogged = false;
     m_previewLogged = false;
     m_previewAbsentLogged = 0;
+    m_uiTagLogged = false;
+    m_uiMismatchLogged = false;
 }
 } // namespace mfg

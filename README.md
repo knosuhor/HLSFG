@@ -30,10 +30,17 @@ contract.
   flat/stale tags alive during intro/menu/cutscene phases; that is the
   host's prerogative, not data to rule on). No quality verdicts, no
   readback probes, no byte re-interpretation.
-- **HUD recomposition, two modes**:
+- **HUD recomposition, five modes** (picked per frame in guide priority
+  order: UI tags first, then hudless delta, then temporal):
   - *hudless delta* (default): with a tagged HUD-less capture the UI layer
     is `(backbuffer - hudless)`, detected per frame with a threshold and
     layered onto generated frames.
+  - *UI Color and Alpha* (`DLSSG.UI`): exact recomposition with the
+    Streamline blending formula `out = UI.rgb + (1 - UI.a) * interp`.
+  - *UI Alpha* (`DLSSG.UIAlpha`, preferred by the guide when both UI
+    tags exist): exact when hudless is also tagged
+    (`out = present + (1 - A) * (interp - hudless)`), approximate
+    otherwise (`lerp(interp, present, A)`).
   - *temporal mask* (experimental, off by default): when no hudless is
     tagged, pixels that did not change between consecutive real frames are
     pinned to the current real frame instead of being interpolated. Being a
@@ -98,7 +105,8 @@ src/backends.{h,cpp}   IFGBackend seam (single LSFG instance)
 src/lsfg_backend.*     LSFG graph on the caller's device, input
                        preview, present-contract output handling
 src/lsfg/              shader bank extraction + graph pipeline
-src/ui_composite.*     hudless-delta and temporal-mask UI modes
+src/ui_composite.*     five UI composite modes (hudless delta, UI tags,
+                       temporal mask)
 docs/CONTRACT.md       measured OptiScaler contract, source references
 docs/PHASES.md         historical phase roadmap
 ```
@@ -109,10 +117,12 @@ docs/PHASES.md         historical phase roadmap
   warp/smear during camera motion (same class of artifact as any FG without
   a UI layer). OptiScaler's own `FGDisableHudless` converges to the same
   state: nulling the tag gives the identical pipeline.
-- `DLSSG.UI` / `UIAlpha` / subrect parameters are logged when present but
-  not yet consumed (no SL2 host measured so far provides them).
-- Subrects (`*SubrectBaseX/Y`, `*SubrectWidth/Height`) are not handled yet;
-  titles presenting via subrects fall back to whole-frame paths.
+- `DLSSG.UI` / `UIAlpha` are consumed for exact UI recomposition when a
+  host tags them (modes 2/3/4); no SL2 host measured so far provides
+  them, so the paths are exercised only when a tag actually arrives.
+- Subrect (`*SubrectBaseX/Y`, `*SubrectWidth/Height`) parameters are
+  logged when present but not handled yet; titles presenting via
+  subrects fall back to whole-frame paths.
 - The temporal UI mask is experimental and disabled by default (see above).
 - Vulkan surface is phase 2.
 

@@ -213,7 +213,7 @@ src/lsfg_backend.*    the backend: ring buffer of source frames,
 src/lsfg/pipeline.cpp lsfg-vk v2.0.0-dev graph on ID3D12Device
 src/lsfg/shader_bank  extraction of the 202 RT_RCDATA resources from the
                       user's Lossless.dll (runtime, never vendored)
-src/ui_composite.*    one compute pass, two modes (see below)
+src/ui_composite.*    one compute pass, five modes (see HUD handling)
 src/mfg_state.*       settings (g_settings)
 ```
 
@@ -240,7 +240,21 @@ src/mfg_state.*       settings (g_settings)
 1. If a host provides `DLSSG.UI`/`UIAlpha` (none measured so far on
    D3D12; OptiScaler forwards these keys only on its Vulkan path today;
    probed and logged once per session at call #5): consume for exact
-   recomposition. Not implemented yet.
+   recomposition. **Implemented** as composite modes 2/3/4 in
+   ui_composite (guide formula `Final.RGB = UI.RGB + (1-UI.A) *
+   Hudless.RGB`):
+   - `DLSSG.UIAlpha` + hudless -> mode 3: UI.RGB is recovered from the
+     tagged pair as `present - (1-A)*hudless`, then
+     `out = present + (1-A)*(interp - hudless)` (exact UI layer added
+     on top of the interpolated hudless).
+   - `DLSSG.UIAlpha` without hudless -> mode 4: approximation
+     `lerp(interp, present, A)` (UI read from the single channel .r).
+   - `DLSSG.UI` (Color+Alpha, premultiplied) -> mode 2:
+     `out = UI.rgb + (1-UI.a) * interp`.
+   UI tags must match the interpolated extent (guide 5.1); a mismatched
+   tag is treated as absent and logged once, never judged. Assumed
+   state for the UI resource at Evaluate: NON_PIXEL_SHADER_RESOURCE
+   (same as the backbuffer; we add no transition for it).
 2. Tagged hudless (trusted as delivered, see the input policy): interpolate
    the hudless ring, composite mode 0:
    `out = interp + (backbuffer - hudless) * mask(threshold)`.
@@ -293,15 +307,11 @@ Copy-Item .\build\Release\nvngx_dlssg.dll <game>\custom\HLSFG\dlssg\nvngx_dlssg.
    (findings stay pinned until they really move), optionally gated by
    global camera motion from the flow field. This is the path to sharp
    HUD in untagged hosts without judder. Do not ship stateless again.
-2. **DLSSG.UI / UIAlpha consumer**: exact recomposition when a host
-   provides the UI layer; probe logging already in place (D3D12 hosts
-   measured so far do not provide it; OptiScaler forwards the keys only
-   on its Vulkan path).
-3. **Subrect support** (`*SubrectBaseX/Y/Width/Height`): copy regions
+2. **Subrect support** (`*SubrectBaseX/Y/Width/Height`): copy regions
    instead of whole frames where the host presents via subrects.
-4. **R10G10B10A2 + HDR** color path audit (PQ10 profiles) and the
+3. **R10G10B10A2 + HDR** color path audit (PQ10 profiles) and the
    BidirectionalDistortionField / NoWarp inputs.
-5. Vulkan surface (later; MAKO FG behind the same seam).
+4. Vulkan surface (later; MAKO FG behind the same seam).
 
 ## Housekeeping
 

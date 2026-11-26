@@ -12,6 +12,7 @@ namespace
 const char* const kShader = R"(Texture2D<float4> Hudless : register(t0);
 Texture2D<float4> Present : register(t1);
 Texture2D<float4> Interp : register(t2);
+Texture2D<float4> Ui : register(t3);
 RWTexture2D<float4> Dst : register(u0);
 cbuffer Params : register(b0) { uint W; uint H; float Cutoff; uint Mode; };
 [numthreads(16, 16, 1)]
@@ -24,12 +25,36 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float delta = max(d.r, max(d.g, d.b));
     float t = max(Cutoff, 0.0001);
     float mask;
+    float4 it = Interp.Load(int3(id.xy, 0));
     if (Mode == 0)
     {
         // hudless delta: present - hudless is exactly the UI layer
         mask = smoothstep(t, t * 2.0, delta);
-        float4 it = Interp.Load(int3(id.xy, 0));
         Dst[id.xy] = float4(it.rgb + (pcol - hcol) * mask, it.a);
+    }
+    else if (Mode == 2)
+    {
+        // UI Color and Alpha (guide formula, UI.RGB premultiplied):
+        //   Final.RGB = UI.RGB + (1 - UI.A) * Hudless.RGB
+        // with the interpolated frame in the hudless role.
+        float4 ui = Ui.Load(int3(id.xy, 0));
+        Dst[id.xy] = float4(ui.rgb + (1.0 - ui.a) * it.rgb, it.a);
+    }
+    else if (Mode == 3)
+    {
+        // UI Alpha, exact (hudless available): the guide formula gives
+        //   UI.RGB = present - (1 - A) * hudless
+        // so   out = UI.RGB + (1 - A) * interp
+        //        = present + (1 - A) * (interp - hudless)
+        float a = Ui.Load(int3(id.xy, 0)).r;
+        Dst[id.xy] = float4(pcol + (1.0 - a) * (it.rgb - hcol), it.a);
+    }
+    else if (Mode == 4)
+    {
+        // UI Alpha without hudless (approximation): the alpha marks UI
+        // pixels; take them sharp from the current real frame.
+        float a = Ui.Load(int3(id.xy, 0)).r;
+        Dst[id.xy] = float4(it.rgb + (pcol - it.rgb) * a, it.a);
     }
     else
     {
@@ -47,7 +72,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float lr = max(hcol.r, max(hcol.g, hcol.b));
         float l = max(lp, lr);
         float thr = max(t * 0.5, 0.25 * l);        mask = 1.0 - smoothstep(thr, thr * 2.0, delta);
-        float4 it = Interp.Load(int3(id.xy, 0));
         Dst[id.xy] = float4(it.rgb + (pcol - it.rgb) * mask, it.a);
     }
 })";
@@ -118,10 +142,10 @@ bool UiComposite::Init(ID3D12Device* device)
         return false;
     }
 
-    // root signature: constants(w, h, cutoff, mode) | SRV table(3) | UAV(1)
+    // root signature: constants(w, h, cutoff, mode) | SRV table(4) | UAV(1)
     D3D12_DESCRIPTOR_RANGE srv{}, uav{};
     srv.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv.NumDescriptors = 3;
+    srv.NumDescriptors = 4;
     srv.BaseShaderRegister = 0;
     srv.OffsetInDescriptorsFromTableStart = 0;
     uav.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
@@ -172,7 +196,7 @@ bool UiComposite::Init(ID3D12Device* device)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 4; // 3 SRV + 1 UAV
+    hd.NumDescriptors = 5; // 4 SRV + 1 UAV
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap))))
     {
@@ -214,12 +238,15 @@ bool UiComposite::EnsureScratch(const D3D12_RESOURCE_DESC& interpDesc)
 }
 void UiComposite::Dispatch(ID3D12GraphicsCommandList* cmd,
     ID3D12Resource* hudless, ID3D12Resource* present,
-    ID3D12Resource* interp, uint32_t width, uint32_t height, float cutoff,
-    uint32_t mode)
+    ID3D12Resource* interp, ID3D12Resource* ui, uint32_t width,
+    uint32_t height, float cutoff, uint32_t mode)
 {
     if (!m_ready || cmd == nullptr || hudless == nullptr ||
         present == nullptr || interp == nullptr || width == 0 ||
         height == 0)
+        return;
+    // modes 2/3/4 read the UI texture (t3); other modes ignore it
+    if (ui == nullptr && mode >= 2)
         return;
     const D3D12_RESOURCE_DESC interpDesc = interp->GetDesc();
     if (interpDesc.DepthOrArraySize != 1)
@@ -235,11 +262,14 @@ void UiComposite::Dispatch(ID3D12GraphicsCommandList* cmd,
     if (!EnsureScratch(interpDesc))
         return;
 
-    // heap: [0] hudless [1] present [2] interp [3] scratch UAV
+    // heap: [0] hudless [1] present [2] interp [3] ui [4] scratch UAV
+    // (modes without a UI texture bind the hudless slot as a placeholder;
+    // the shader does not read t3 in those modes)
     const auto cpu = m_heap->GetCPUDescriptorHandleForHeapStart();
     const auto gpu = m_heap->GetGPUDescriptorHandleForHeapStart();
-    ID3D12Resource* sr[3] = {hudless, present, interp};
-    for (UINT i = 0; i < 3; ++i)
+    ID3D12Resource* sr[4] = {hudless, present, interp,
+        ui != nullptr ? ui : hudless};
+    for (UINT i = 0; i < 4; ++i)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format = Concrete(sr[i]->GetDesc().Format);
@@ -254,10 +284,12 @@ void UiComposite::Dispatch(ID3D12GraphicsCommandList* cmd,
     uv.Format = Concrete(interpDesc.Format);
     uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     m_device->CreateUnorderedAccessView(m_scratch.Get(), nullptr, &uv,
-        {cpu.ptr + m_heapInc * 3});
+        {cpu.ptr + m_heapInc * 4});
 
     const D3D12_RESOURCE_STATES npsr =
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    // The UI texture is assumed to arrive in NON_PIXEL_SHADER_RESOURCE
+    // (like the backbuffer), so sampling needs no transition at all.
     const D3D12_RESOURCE_BARRIER pre[] = {
         Trans(interp, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, npsr),
         Trans(hudless, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, npsr),
@@ -272,7 +304,7 @@ void UiComposite::Dispatch(ID3D12GraphicsCommandList* cmd,
     cmd->SetComputeRoot32BitConstants(0, 4, &cb, 0);
     cmd->SetComputeRootDescriptorTable(1, {gpu.ptr});
     cmd->SetComputeRootDescriptorTable(2,
-        {gpu.ptr + (uint64_t) m_heapInc * 3});
+        {gpu.ptr + (uint64_t) m_heapInc * 4});
     cmd->SetPipelineState(m_pso.Get());
     cmd->Dispatch((width + 15) / 16, (height + 15) / 16, 1);
 
