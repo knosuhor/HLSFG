@@ -91,6 +91,17 @@ void Draw(void* /*userData*/)
                      "not track the scene is dropped for the rest of the session and the "
                      "frames are generated straight from the backbuffer.");
 
+    const char* previewModes[] = { "Off", "Raw HUDLess on outputs" };
+    bool previewDisabled[] = { false, false };
+    int previewSel = mfg::g_settings.hudlessPreview.load() ? 1 : 0;
+    if (api->Combo("HUDLess preview##mfg", &previewSel, previewModes, 2, previewDisabled))
+        mfg::g_settings.hudlessPreview.store(previewSel == 1);
+    api->ItemTooltip("Writes the raw tagged HUDLessColor texture to both frame generation "
+                     "outputs, bypassing LSFG entirely: the on-screen picture becomes the "
+                     "hudless input exactly as the game delivers it, every frame. Frames "
+                     "without a tagged hudless fall back to the normal pipeline. "
+                     "Applies instantly.");
+
     bool fileLog = mfg::g_settings.fileLog.load();
     if (api->Checkbox("Write hlsfg.log##mfg", &fileLog))
         mfg::g_settings.fileLog.store(fileLog);
@@ -103,6 +114,7 @@ void Draw(void* /*userData*/)
         api->SetBool(plugin, "FileLog", mfg::g_settings.fileLog.load());
         api->SetBool(plugin, "UiComposite", mfg::g_settings.uiComposite.load());
         api->SetBool(plugin, "TemporalUi", mfg::g_settings.temporalUi.load());
+        api->SetBool(plugin, "HudlessPreview", mfg::g_settings.hudlessPreview.load());
         api->SetInt(plugin, "HudlessInvert", mfg::g_settings.hudlessInvert.load());
         // UiCutoff stays internal (tunable via the ini key only, default 2).
         api->SaveSettings(plugin);
@@ -138,6 +150,7 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const OptiPluginApi* api, O
     mfg::g_settings.fileLog.store(api->GetBool(plugin, "FileLog", true));
     mfg::g_settings.uiComposite.store(api->GetBool(plugin, "UiComposite", true));
     mfg::g_settings.temporalUi.store(api->GetBool(plugin, "TemporalUi", false));
+    mfg::g_settings.hudlessPreview.store(api->GetBool(plugin, "HudlessPreview", false));
     mfg::g_settings.uiCutoff.store(api->GetInt(plugin, "UiCutoff", 2));
     mfg::g_settings.hudlessInvert.store(api->GetInt(plugin, "HudlessInvert", 0));
 

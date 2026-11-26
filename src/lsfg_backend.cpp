@@ -836,6 +836,41 @@ NVSDK_NGX_Result LsfgBackend::EvaluateD3D12(ID3D12GraphicsCommandList* cmdList,
     if (m_hudlessBroken)
         hudless = nullptr;
 
+    // HUDLess preview (tab dropdown): bypass the graph entirely and
+    // write the raw tagged HUDLessColor to both outputs, so what is on
+    // screen IS the hudless the game delivers. Uses the tagged pointer
+    // (works before and after a garbage verdict); frames without a
+    // tagged hudless fall through to the normal pipeline.
+    if (g_settings.hudlessPreview.load() && taggedHudless != nullptr &&
+        cmdList != nullptr)
+    {
+        bool previewed = false;
+        if (outputReal != nullptr && SameFamily(
+                outputReal->GetDesc().Format, taggedHudless->GetDesc().Format))
+        {
+            CopyFrame(cmdList, outputReal, taggedHudless,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            previewed = true;
+        }
+        if (outputInterpolated != nullptr && SameFamily(
+                outputInterpolated->GetDesc().Format,
+                taggedHudless->GetDesc().Format))
+        {
+            CopyFrame(cmdList, outputInterpolated, taggedHudless,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            previewed = true;
+        }
+        if (previewed)
+        {
+            if (m_calls <= 3 ||
+                (m_previewLogged && (m_calls % 500) == 0))
+                MFG_LOG_INFO("lsfg: preview: raw HUDLessColor on outputs "
+                    "(call#%llu)", m_calls);
+            m_previewLogged = true;
+            return NVSDK_NGX_Result_Success;
+        }
+    }
+
     // slot identity: pointer-bits contract measured against OptiScaler
     void* rawIndex = nullptr;
     const bool hasIndex =
@@ -1150,6 +1185,7 @@ void LsfgBackend::Shutdown()
     m_lastProbeCall = 0;
     m_probeCount = 0;
     m_temporalLogged = false;
+    m_previewLogged = false;
     m_startMeanB = 0.0;
     m_startMeanH = 0.0;
     m_startVarB = 0.0;

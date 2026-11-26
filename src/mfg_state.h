@@ -27,6 +27,10 @@ struct Settings
     // threshold without temporal state, can judder in low-contrast
     // motion, hence opt-in (ini TemporalUi / tab checkbox).
     std::atomic<bool> temporalUi{ false };
+    // HUDLess preview: write the raw tagged HUDLessColor straight to
+    // both FG outputs, bypassing the graph (on-screen inspection of
+    // what the game actually delivers; live, ini HudlessPreview).
+    std::atomic<bool> hudlessPreview{ false };
     std::atomic<int> uiCutoff{ 2 };         // UI delta threshold, percent (0..10)
     // HUDLessColor byte polarity: 0 = auto-detect (readback probe),
     // 1 = complemented storage (255 - color), 2 = direct storage.

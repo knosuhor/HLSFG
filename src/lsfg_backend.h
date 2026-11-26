@@ -89,5 +89,6 @@ class LsfgBackend final : public IFGBackend
         uint32_t mode);
 
     bool m_temporalLogged = false;  // first temporal composite logged
+    bool m_previewLogged = false;   // HUDLess preview active logged
 };
 } // namespace mfg
